@@ -1,11 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { MapContainer, TileLayer, Marker, useMapEvents } from "react-leaflet";
 import { getFirestore, collection, query, where, getDocs } from "firebase/firestore";
-
 import L from "leaflet";
 import axios from "axios";
 import { FaTimes } from "react-icons/fa"; // Icono de cierre
-
 import { QRCodeCanvas } from "qrcode.react";
 import logo from "../assets/logoQr.png";
 
@@ -27,12 +25,13 @@ const BusinessForm = ({
   currentStep,
   setNewBusiness,
   handleCancel,
+  // Nueva prop opcional: si se pasa, se usarán estas opciones en lugar de las obtenidas desde Firestore.
+  agentOptions,
 }) => {
   const [mapPosition, setMapPosition] = useState(null);
   const [address, setAddress] = useState("");
   const [loadingLocation, setLoadingLocation] = useState(true);
   const [agents, setAgents] = useState([]); // Estado para almacenar los agentes
- // Estado para controlar la carga de ubicación
 
   // Convertir coordenadas a dirección
   const fetchAddressFromCoordinates = async (lat, lng) => {
@@ -82,7 +81,13 @@ const BusinessForm = ({
       detectCurrentLocation();
     }
   }, [currentStep]);
+
+  // Efecto para obtener agentes. Si se recibe la prop agentOptions, se usan esos; de lo contrario se consultan desde Firestore.
   useEffect(() => {
+    if (agentOptions && agentOptions.length > 0) {
+      setAgents(agentOptions);
+      return;
+    }
     const fetchAgents = async () => {
       try {
         const db = getFirestore(); // Inicializa Firestore
@@ -102,11 +107,7 @@ const BusinessForm = ({
     };
 
     fetchAgents();
-  }, []);
-
-
-  
-  
+  }, [agentOptions]);
 
   // Componente para manejar eventos de marcador
   const DraggableMarker = () => {
@@ -143,7 +144,6 @@ const BusinessForm = ({
     detectCurrentLocation(); // Detectar nuevamente la ubicación actual
     handleCancel(); // Cerrar el modal
   };
-  
 
   return (
     <div
@@ -166,173 +166,172 @@ const BusinessForm = ({
         <h2 className="text-xl font-bold mb-4 text-gray-800">Registrar Negocio</h2>
 
         {currentStep === 1 && (
-  <div>
-    <h3 className="text-lg font-semibold mb-2 text-gray-800">Paso 1: Datos Generales</h3>
-    <form>
-      <div className="mb-4">
-        <label className="block text-gray-700 mb-2">Nombre</label>
-        <input
-          type="text"
-          name="name"
-          value={newBusiness.name}
-          onChange={handleInputChange}
-          className="w-full border border-gray-300 p-2 rounded text-gray-800"
-          required
-        />
-      </div>
-      <div className="mb-4">
-        <label className="block text-gray-700 mb-2">Propietario</label>
-        <input
-          type="text"
-          name="owner"
-          value={newBusiness.owner}
-          onChange={handleInputChange}
-          className="w-full border border-gray-300 p-2 text-gray-800 rounded"
-          required
-        />
-      </div>
-      <div className="mb-4">
-        <label className="block text-gray-700 mb-2">Agente Asignado</label>
-        <select
-          name="agentId"
-          value={newBusiness.agentId || ""}
-          onChange={(e) =>
-            setNewBusiness({ ...newBusiness, agentId: e.target.value })
-          }
-          className="w-full border border-gray-300 p-2 text-gray-800 rounded"
-          required
-        >
-          <option value="">Selecciona un agente</option>
-          {agents.map((agent) => (
-            <option key={agent.id} value={agent.id}>
-              {agent.name || agent.email} {/* Ajusta según tus datos */}
-            </option>
-          ))}
-        </select>
-      </div>
+          <div>
+            <h3 className="text-lg font-semibold mb-2 text-gray-800">Paso 1: Datos Generales</h3>
+            <form>
+              <div className="mb-4">
+                <label className="block text-gray-700 mb-2">Nombre</label>
+                <input
+                  type="text"
+                  name="name"
+                  value={newBusiness.name}
+                  onChange={handleInputChange}
+                  className="w-full border border-gray-300 p-2 rounded text-gray-800"
+                  required
+                />
+              </div>
+              <div className="mb-4">
+                <label className="block text-gray-700 mb-2">Propietario</label>
+                <input
+                  type="text"
+                  name="owner"
+                  value={newBusiness.owner}
+                  onChange={handleInputChange}
+                  className="w-full border border-gray-300 p-2 text-gray-800 rounded"
+                  required
+                />
+              </div>
+              <div className="mb-4">
+                <label className="block text-gray-700 mb-2">Agente Asignado</label>
+                <select
+                  name="agentId"
+                  value={newBusiness.agentId || ""}
+                  onChange={(e) =>
+                    setNewBusiness({ ...newBusiness, agentId: e.target.value })
+                  }
+                  className="w-full border border-gray-300 p-2 text-gray-800 rounded"
+                  required
+                >
+                  <option value="">Selecciona un agente</option>
+                  {agents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name || agent.email}
+                    </option>
+                  ))}
+                </select>
+              </div>
 
-      <div className="mb-4">
-        <label className="block text-gray-700 mb-2">Giro Comercial</label>
-        <select
-          name="type"
-          value={newBusiness.type}
-          onChange={handleInputChange}
-          className="w-full border border-gray-300 p-2 text-gray-800 rounded"
-          required
-        >
-          <option value="">Selecciona una opción</option>
-          <option value="Alimentos">Alimentos</option>
-          <option value="Comercio">Comercio</option>
-          <option value="Servicio">Servicio</option>
-        </select>
-      </div>
-      <div className="mb-4">
-        <label className="block text-gray-700 mb-2">Teléfono</label>
-        <input
-          type="text"
-          name="phone"
-          value={newBusiness.phone}
-          onChange={handleInputChange}
-          className="w-full border border-gray-300 p-2 text-gray-800 rounded"
-          required
-        />
-      </div>
-      <div className="mb-4">
-        <label className="block text-gray-700 mb-2">Cuota</label>
-        <input
-          type="number"
-          name="quota"
-          value={newBusiness.quota || ""}
-          onChange={handleInputChange}
-          className="w-full border border-gray-300 p-2 text-gray-800 rounded"
-          placeholder="Ingrese la cuota del negocio"
-          required
-        />
-      </div>
-      <div className="mb-4 text-gray-800">
-        <label className="block text-gray-700 mb-2">Horario</label>
-        <div className="flex gap-4">
-          <div className="flex-1">
-            <label className="block text-gray-700 text-sm mb-1">Apertura</label>
-            <input
-              type="time"
-              name="openingTime"
-              value={newBusiness.schedule?.openingTime || ""}
-              onChange={(e) =>
-                setNewBusiness((prev) => ({
-                  ...prev,
-                  schedule: {
-                    ...prev.schedule,
-                    openingTime: e.target.value,
-                  },
-                }))
-              }
-              className="w-full border border-gray-300 p-2 rounded"
-              required
-            />
+              <div className="mb-4">
+                <label className="block text-gray-700 mb-2">Giro Comercial</label>
+                <select
+                  name="type"
+                  value={newBusiness.type}
+                  onChange={handleInputChange}
+                  className="w-full border border-gray-300 p-2 text-gray-800 rounded"
+                  required
+                >
+                  <option value="">Selecciona una opción</option>
+                  <option value="Alimentos">Alimentos</option>
+                  <option value="Comercio">Comercio</option>
+                  <option value="Servicio">Servicio</option>
+                </select>
+              </div>
+              <div className="mb-4">
+                <label className="block text-gray-700 mb-2">Teléfono</label>
+                <input
+                  type="text"
+                  name="phone"
+                  value={newBusiness.phone}
+                  onChange={handleInputChange}
+                  className="w-full border border-gray-300 p-2 text-gray-800 rounded"
+                  required
+                />
+              </div>
+              <div className="mb-4">
+                <label className="block text-gray-700 mb-2">Cuota</label>
+                <input
+                  type="number"
+                  name="quota"
+                  value={newBusiness.quota || ""}
+                  onChange={handleInputChange}
+                  className="w-full border border-gray-300 p-2 text-gray-800 rounded"
+                  placeholder="Ingrese la cuota del negocio"
+                  required
+                />
+              </div>
+              <div className="mb-4 text-gray-800">
+                <label className="block text-gray-700 mb-2">Horario</label>
+                <div className="flex gap-4">
+                  <div className="flex-1">
+                    <label className="block text-gray-700 text-sm mb-1">Apertura</label>
+                    <input
+                      type="time"
+                      name="openingTime"
+                      value={newBusiness.schedule?.openingTime || ""}
+                      onChange={(e) =>
+                        setNewBusiness((prev) => ({
+                          ...prev,
+                          schedule: {
+                            ...prev.schedule,
+                            openingTime: e.target.value,
+                          },
+                        }))
+                      }
+                      className="w-full border border-gray-300 p-2 rounded"
+                      required
+                    />
+                  </div>
+                  <div className="flex-1 text-gray-800">
+                    <label className="block text-gray-700 text-sm mb-1">Cierre</label>
+                    <input
+                      type="time"
+                      name="closingTime"
+                      value={newBusiness.schedule?.closingTime || ""}
+                      onChange={(e) =>
+                        setNewBusiness((prev) => ({
+                          ...prev,
+                          schedule: {
+                            ...prev.schedule,
+                            closingTime: e.target.value,
+                          },
+                        }))
+                      }
+                      className="w-full border border-gray-300 p-2 rounded"
+                      required
+                    />
+                  </div>
+                </div>
+              </div>
+              <div className="mb-4">
+                <label className="block text-gray-700 mb-2">Días de apertura</label>
+                <div className="grid grid-cols-3 gap-2 text-gray-800">
+                  {["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"].map((day) => (
+                    <label key={day} className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        value={day}
+                        checked={newBusiness.schedule?.days?.includes(day) || false}
+                        onChange={(e) => {
+                          const isChecked = e.target.checked;
+                          setNewBusiness((prev) => ({
+                            ...prev,
+                            schedule: {
+                              ...prev.schedule,
+                              days: isChecked
+                                ? [...(prev.schedule?.days || []), day]
+                                : prev.schedule?.days.filter((d) => d !== day),
+                            },
+                          }));
+                        }}
+                        className="form-checkbox"
+                      />
+                      {day}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleNextStep}
+                  className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                >
+                  Siguiente
+                </button>
+              </div>
+            </form>
           </div>
-          <div className="flex-1 text-gray-800">
-            <label className="block text-gray-700 text-sm mb-1">Cierre</label>
-            <input
-              type="time"
-              name="closingTime"
-              value={newBusiness.schedule?.closingTime || ""}
-              onChange={(e) =>
-                setNewBusiness((prev) => ({
-                  ...prev,
-                  schedule: {
-                    ...prev.schedule,
-                    closingTime: e.target.value,
-                  },
-                }))
-              }
-              className="w-full border border-gray-300 p-2 rounded"
-              required
-            />
-          </div>
-        </div>
-      </div>
-      <div className="mb-4">
-        <label className="block text-gray-700 mb-2">Días de apertura</label>
-        <div className="grid grid-cols-3 gap-2 text-gray-800">
-          {["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"].map((day) => (
-            <label key={day} className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                value={day}
-                checked={newBusiness.schedule?.days?.includes(day) || false}
-                onChange={(e) => {
-                  const isChecked = e.target.checked;
-                  setNewBusiness((prev) => ({
-                    ...prev,
-                    schedule: {
-                      ...prev.schedule,
-                      days: isChecked
-                        ? [...(prev.schedule?.days || []), day]
-                        : prev.schedule?.days.filter((d) => d !== day),
-                    },
-                  }));
-                }}
-                className="form-checkbox"
-              />
-              {day}
-            </label>
-          ))}
-        </div>
-      </div>
-      <div className="flex justify-end">
-        <button
-          type="button"
-          onClick={handleNextStep}
-          className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
-        >
-          Siguiente
-        </button>
-      </div>
-    </form>
-  </div>
-)}
-
+        )}
 
         {currentStep === 2 && (
           <div>
@@ -415,7 +414,7 @@ const BusinessForm = ({
               )}
               <button
                 type="button"
-                onClick={resetForm} // Llamar a la función de reinicio
+                onClick={resetForm}
                 className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
               >
                 Finalizar

@@ -32,8 +32,6 @@ import { MdOutlineAddBusiness, MdQrCodeScanner } from "react-icons/md";
 dayjs.locale("es");
 dayjs.extend(customParseFormat);
 
-
-
 const AVERAGE_SPEED_KMH = 25;
 const MIN_DISTANCE_KM = 0.05; // 50 metros
 
@@ -78,11 +76,12 @@ const useGeolocation = () => {
 const AgentDashboard = () => {
   // Estados principales
   const [rawBusinesses, setRawBusinesses] = useState([]); // Todos los negocios del agente
-  const [paidBusinessIds, setPaidBusinessIds] = useState([]); // IDs de negocios que pagaron hoy
+  const [paidBusinessIds, setPaidBusinessIds] = useState([]); // IDs de negocios que pagaron hoy (excluyendo abonos)
   const [reportedBusinessIds, setReportedBusinessIds] = useState([]); // IDs de negocios con reporte hoy
   const [assignedBusinesses, setAssignedBusinesses] = useState([]); // Negocios asignados sin pago ni reporte hoy
-  const [filteredBusinesses, setFilteredBusinesses] = useState([]); // Top 5 más cercanos (solo los que están abiertos)
+  const [filteredBusinesses, setFilteredBusinesses] = useState([]); // Top n más cercanos (solo los que están abiertos)
   const [searchResults, setSearchResults] = useState([]); // Resultados de búsqueda
+  const [displayCount, setDisplayCount] = useState(5); // Número de negocios a mostrar inicialmente
 
   const [loading, setLoading] = useState(true);
   const [isFetchingLocation, setIsFetchingLocation] = useState(false);
@@ -133,6 +132,7 @@ const AgentDashboard = () => {
   }, []);
 
   // -------------------- Suscripción a "cobros" (del día) --------------------
+  // Se excluyen los pagos cuyo tipo sea "abono"
   useEffect(() => {
     if (!user) return;
     const agentId = user.uid;
@@ -146,9 +146,17 @@ const AgentDashboard = () => {
       where("date", "<=", endOfDay)
     );
     const unsub = onSnapshot(qCobros, (snapshot) => {
-      const ids = snapshot.docs.map((doc) => doc.data().businessId);
-      console.log("Cobros de hoy (IDs) =>", ids);
-      setPaidBusinessIds(ids);
+      const paymentMap = {};
+      snapshot.docs.forEach((doc) => {
+        const data = doc.data();
+        // Solo se registran pagos cuyo tipo NO sea "abono"
+        if (data.tipo !== "abono") {
+          paymentMap[data.businessId] = true;
+        }
+      });
+      const paidIds = Object.keys(paymentMap);
+      console.log("Cobros de hoy (excluyendo abonos) =>", paidIds);
+      setPaidBusinessIds(paidIds);
     });
     return () => unsub();
   }, [db, user]);
@@ -192,13 +200,10 @@ const AgentDashboard = () => {
       setAssignedBusinesses([]);
       return;
     }
-    const todayStr = new Date().toISOString().split("T")[0];
     const assigned = rawBusinesses.filter((b) => {
-      if (b.lastPaymentDate) {
-        const lastPayDate = new Date(b.lastPaymentDate).toISOString().split("T")[0];
-        if (lastPayDate === todayStr) return false;
-      }
+      // Se descarta el negocio si su ID se encuentra en la lista de pagos (excluyendo abonos)
       if (paidBusinessIds.includes(b.id)) return false;
+      // Se descarta si el negocio ya tiene un reporte hoy
       if (reportedBusinessIds.includes(String(b.id))) return false;
       return true;
     });
@@ -206,7 +211,7 @@ const AgentDashboard = () => {
     setAssignedBusinesses(assigned);
   }, [rawBusinesses, paidBusinessIds, reportedBusinessIds]);
 
-  // -------------------- Calcular distancia y obtener top 5 (excluyendo los cerrados) --------------------
+  // -------------------- Calcular distancia y obtener top n (excluyendo los cerrados) --------------------
   useEffect(() => {
     if (!assignedBusinesses.length || !userLocation) {
       setFilteredBusinesses([]);
@@ -217,36 +222,28 @@ const AgentDashboard = () => {
     const updated = assignedBusinesses
       .filter((b) => b.location && b.status === "activo")
       .map((b) => {
-        // Determinar si el negocio está abierto
+        // Determinar si el negocio está abierto según su horario
         let isOpen = true;
         if (b.schedule && b.schedule.days && b.schedule.openingTime && b.schedule.closingTime) {
-          // Obtener el día actual en español, en minúsculas (por ejemplo: "lunes")
           const todayName = dayjs().format("dddd").toLowerCase();
           const scheduleDays = b.schedule.days.map((d) => d.toLowerCase());
-          console.log(`Negocio: ${b.name} - Hoy: ${todayName} - Días programados: ${scheduleDays}`);
           if (!scheduleDays.includes(todayName)) {
             isOpen = false;
-            console.log(`Negocio: ${b.name} no abre hoy.`);
           } else {
             const [openHour, openMinute] = b.schedule.openingTime.split(":").map(Number);
             const [closeHour, closeMinute] = b.schedule.closingTime.split(":").map(Number);
             const now = dayjs();
             const opening = dayjs().hour(openHour).minute(openMinute).second(0);
             let closing = dayjs().hour(closeHour).minute(closeMinute).second(0);
-            // Si la hora de cierre es menor que la de apertura, se asume que cierra al día siguiente
             if (closing.isBefore(opening)) {
               closing = closing.add(1, "day");
             }
-            console.log(
-              `Negocio: ${b.name} - Ahora: ${now.format("HH:mm")} - Apertura: ${opening.format("HH:mm")} - Cierre: ${closing.format("HH:mm")}`
-            );
             if (now.isBefore(opening) || now.isAfter(closing)) {
               isOpen = false;
-              console.log(`Negocio: ${b.name} está cerrado en este momento.`);
             }
           }
         }
-        // Calcular distancia
+        // Calcular distancia usando la fórmula de Haversine
         const [lat2, lon2] = b.location
           .replace("Lat: ", "")
           .replace("Lng: ", "")
@@ -261,13 +258,12 @@ const AgentDashboard = () => {
           isOpen,
         };
       })
-      // Filtrar para incluir solo los negocios abiertos
       .filter((b) => b.isOpen)
       .sort((a, b) => parseFloat(a.distance) - parseFloat(b.distance))
-      .slice(0, 5);
+      .slice(0, displayCount);
     setFilteredBusinesses(updated);
     setIsFetchingLocation(false);
-  }, [assignedBusinesses, userLocation]);
+  }, [assignedBusinesses, userLocation, displayCount]);
 
   // -------------------- Cálculo de distancia (Fórmula Haversine) --------------------
   const calculateDistance = (lat1, lon1, lat2, lon2) => {
@@ -507,7 +503,7 @@ const AgentDashboard = () => {
                     timeMin,
                   };
                 }
-                // Para la búsqueda, determinar si el negocio está abierto (pero no filtrar)
+                // Determinar si el negocio está abierto para la búsqueda
                 let isOpen = true;
                 if (b.schedule && b.schedule.days && b.schedule.openingTime && b.schedule.closingTime) {
                   const todayName = dayjs().format("dddd").toLowerCase();
@@ -587,47 +583,71 @@ const AgentDashboard = () => {
             <img src={loadingGif} alt="Cargando..." className="w-16 h-16" />
           </div>
         ) : filteredBusinesses.length > 0 ? (
-          <ul className="space-y-4">
-            {filteredBusinesses.map((b) => (
-              <li
-                key={b.id}
-                className="bg-white shadow-lg rounded-lg p-4 flex items-center justify-between"
-              >
-                <Link
-                  to={`/negocio/${b.id}`}
-                  className="flex items-center flex-1 no-underline text-inherit"
+          <>
+            <ul className="space-y-4">
+              {filteredBusinesses.map((b) => (
+                <li
+                  key={b.id}
+                  className="bg-white shadow-lg rounded-lg p-4 flex items-center justify-between"
                 >
-                  <div className="w-12 h-12 flex items-center justify-center bg-[#701730] text-white rounded-full mr-4 text-lg font-semibold">
-                    {b.name
-                      .split(" ")
-                      .map((word) => word.charAt(0))
-                      .join("")}
+                  <Link
+                    to={`/negocio/${b.id}`}
+                    className="flex items-center flex-1 no-underline text-inherit"
+                  >
+                    <div className="w-12 h-12 flex items-center justify-center bg-[#701730] text-white rounded-full mr-4 text-lg font-semibold">
+                      {b.name
+                        .split(" ")
+                        .map((word) => word.charAt(0))
+                        .join("")}
+                    </div>
+                    <div className="flex-1">
+                      <h2 className="text-lg font-bold text-[#701730]">{b.name}</h2>
+                      <p className="text-sm text-gray-600">{b.owner}</p>
+                      <p className="text-sm text-gray-500">{b.address}</p>
+                      {b.distance && (
+                        <p className="text-sm text-gray-500">
+                          Distancia: {b.distance} km - {b.time} min
+                        </p>
+                      )}
+                    </div>
+                  </Link>
+                  <div className="flex flex-col items-end gap-2">
+                    <div className="px-3 py-1 rounded-full text-sm font-semibold ml-4 bg-green-500 text-white">
+                      {b.time} min
+                    </div>
                   </div>
-                  <div className="flex-1">
-                    <h2 className="text-lg font-bold text-[#701730]">{b.name}</h2>
-                    <p className="text-sm text-gray-600">{b.owner}</p>
-                    <p className="text-sm text-gray-500">{b.address}</p>
-                    {b.distance && (
-                      <p className="text-sm text-gray-500">
-                        Distancia: {b.distance} km - {b.time} min
-                      </p>
-                    )}
-                  </div>
-                </Link>
-                <div className="flex flex-col items-end gap-2">
-                  {/* Mostramos el tiempo estimado en minutos en el chip */}
-                  <div className="px-3 py-1 rounded-full text-sm font-semibold ml-4 bg-green-500 text-white">
-                    {b.time} min
-                  </div>
-                
-                </div>
-              </li>
-            ))}
-          </ul>
+                </li>
+              ))}
+            </ul>
+            {/* Botón para cargar más si hay más negocios asignados */}
+            {assignedBusinesses.filter((b) => {
+              if (!(b.location && b.status === "activo")) return false;
+              if (b.schedule && b.schedule.days && b.schedule.openingTime && b.schedule.closingTime) {
+                const todayName = dayjs().format("dddd").toLowerCase();
+                const scheduleDays = b.schedule.days.map((d) => d.toLowerCase());
+                if (!scheduleDays.includes(todayName)) return false;
+                const [openHour, openMinute] = b.schedule.openingTime.split(":").map(Number);
+                const [closeHour, closeMinute] = b.schedule.closingTime.split(":").map(Number);
+                const now = dayjs();
+                const opening = dayjs().hour(openHour).minute(openMinute).second(0);
+                let closing = dayjs().hour(closeHour).minute(closeMinute).second(0);
+                if (closing.isBefore(opening)) closing = closing.add(1, "day");
+                if (now.isBefore(opening) || now.isAfter(closing)) return false;
+              }
+              return true;
+            }).length > displayCount && (
+              <div className="flex justify-center mt-4">
+                <button
+                  onClick={() => setDisplayCount(displayCount + 5)}
+                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                >
+                  Ver más negocios
+                </button>
+              </div>
+            )}
+          </>
         ) : (
-          <p className="text-center text-white">
-            No tienes negocios asignados (o ya pagaron/reportaron hoy).
-          </p>
+          <p className="text-center text-white">Cargando Negocios...</p>
         )}
       </div>
 
@@ -666,15 +686,22 @@ const AgentDashboard = () => {
               <FaTimes size={20} />
             </button>
             <BusinessForm
-              newBusiness={newBusiness}
-              setNewBusiness={setNewBusiness}
-              handleInputChange={handleInputChange}
-              handleNextStep={handleNextStep}
-              handlePreviousStep={handlePreviousStep}
-              handleFormSubmit={handleFormSubmit}
-              currentStep={currentStep}
-              handleCancel={() => setIsModalOpen(false)}
-            />
+        newBusiness={newBusiness}
+        setNewBusiness={setNewBusiness}
+        handleInputChange={handleInputChange}
+        handleNextStep={handleNextStep}
+        handlePreviousStep={handlePreviousStep}
+        handleFormSubmit={handleFormSubmit}
+        currentStep={currentStep}
+        handleCancel={() => setIsModalOpen(false)}
+        // Aquí se pasa solo el agente actual (el cobrador)
+        agentOptions={[
+          {
+            id: user.uid,
+            name: user.displayName || user.email || "Cobrador",
+          },
+        ]}
+      />
           </div>
         </div>
       )}
