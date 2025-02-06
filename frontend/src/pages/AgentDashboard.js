@@ -7,7 +7,6 @@ import {
   where,
   updateDoc,
   addDoc,
-  getDocs,
 } from "firebase/firestore";
 import {
   getStorage,
@@ -47,6 +46,7 @@ const useGeolocation = () => {
       setError("Geolocalización o API de permisos no soportadas.");
       return;
     }
+    // Usar "geolocation" (en inglés) para que la API funcione correctamente.
     navigator.permissions.query({ name: "geolocation" }).then((result) => {
       if (result.state === "granted" || result.state === "prompt") {
         navigator.geolocation.getCurrentPosition(
@@ -78,10 +78,13 @@ const AgentDashboard = () => {
   const [rawBusinesses, setRawBusinesses] = useState([]); // Todos los negocios del agente
   const [paidBusinessIds, setPaidBusinessIds] = useState([]); // IDs de negocios que pagaron hoy (excluyendo abonos)
   const [reportedBusinessIds, setReportedBusinessIds] = useState([]); // IDs de negocios con reporte hoy
-  const [assignedBusinesses, setAssignedBusinesses] = useState([]); // Negocios asignados sin pago ni reporte hoy
+  const [adeudoBusinessIds, setAdeudoBusinessIds] = useState([]); // IDs de negocios que registraron un adeudo hoy
+  const [assignedBusinesses, setAssignedBusinesses] = useState([]); // Negocios asignados sin pago, reporte ni adeudo hoy
   const [filteredBusinesses, setFilteredBusinesses] = useState([]); // Top n más cercanos (solo los que están abiertos)
   const [searchResults, setSearchResults] = useState([]); // Resultados de búsqueda
-  const [displayCount, setDisplayCount] = useState(5); // Número de negocios a mostrar inicialmente
+
+  // Se muestra siempre 5 negocios, sin opción de "ver más"
+  const displayCount = 5;
 
   const [loading, setLoading] = useState(true);
   const [isFetchingLocation, setIsFetchingLocation] = useState(false);
@@ -132,13 +135,26 @@ const AgentDashboard = () => {
   }, []);
 
   // -------------------- Suscripción a "cobros" (del día) --------------------
-  // Se excluyen los pagos cuyo tipo sea "abono"
   useEffect(() => {
     if (!user) return;
     const agentId = user.uid;
     const now = new Date();
-    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-    const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+    const startOfDay = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      0,
+      0,
+      0
+    );
+    const endOfDay = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      23,
+      59,
+      59
+    );
     const qCobros = query(
       collection(db, "cobros"),
       where("agentId", "==", agentId),
@@ -149,7 +165,6 @@ const AgentDashboard = () => {
       const paymentMap = {};
       snapshot.docs.forEach((doc) => {
         const data = doc.data();
-        // Solo se registran pagos cuyo tipo NO sea "abono"
         if (data.tipo !== "abono") {
           paymentMap[data.businessId] = true;
         }
@@ -165,8 +180,11 @@ const AgentDashboard = () => {
   useEffect(() => {
     if (!user) return;
     const agentId = user.uid;
-    const todayStr = new Date().toISOString().split("T")[0];
-    const qReportes = query(collection(db, "reportes"), where("agentId", "==", agentId));
+    const todayStr = dayjs().format("YYYY-MM-DD");
+    const qReportes = query(
+      collection(db, "reportes"),
+      where("agentId", "==", agentId)
+    );
     const unsub = onSnapshot(qReportes, (snapshot) => {
       const ids = snapshot.docs
         .filter((doc) => {
@@ -176,6 +194,43 @@ const AgentDashboard = () => {
         .map((doc) => doc.data().businessId);
       console.log("Reportes de hoy (IDs) =>", ids);
       setReportedBusinessIds(ids);
+    });
+    return () => unsub();
+  }, [db, user]);
+
+  // -------------------- Suscripción a "adeudos" (del día) --------------------
+  useEffect(() => {
+    if (!user) return;
+    const agentId = user.uid;
+    const qAdeudos = query(
+      collection(db, "adeudos"),
+      where("agentId", "==", agentId)
+    );
+    const unsub = onSnapshot(qAdeudos, (snapshot) => {
+      const adeudoMap = {};
+      snapshot.docs.forEach((doc) => {
+        const data = doc.data();
+        let dateVal = data.date;
+        let docDate;
+        if (!dateVal) return;
+        if (typeof dateVal === "string") {
+          const cleanedDateStr = dateVal.replace(/\./g, "");
+          const formato = "D [de] MMMM [de] YYYY, h:mm:ss a [UTC]Z";
+          docDate = dayjs(cleanedDateStr, formato);
+        } else if (dateVal.toDate && typeof dateVal.toDate === "function") {
+          docDate = dayjs(dateVal.toDate());
+        } else if (dateVal instanceof Date) {
+          docDate = dayjs(dateVal);
+        } else {
+          return;
+        }
+        if (docDate.isValid() && docDate.isSame(dayjs(), "day")) {
+          adeudoMap[data.businessId] = true;
+        }
+      });
+      const adeudoIds = Object.keys(adeudoMap);
+      console.log("Adeudos registrados hoy =>", adeudoIds);
+      setAdeudoBusinessIds(adeudoIds);
     });
     return () => unsub();
   }, [db, user]);
@@ -194,24 +249,23 @@ const AgentDashboard = () => {
     return () => unsub();
   }, [db, user]);
 
-  // -------------------- Filtrar negocios asignados (sin pago ni reporte hoy) --------------------
+  // -------------------- Filtrar negocios asignados --------------------
   useEffect(() => {
     if (!rawBusinesses.length) {
       setAssignedBusinesses([]);
       return;
     }
     const assigned = rawBusinesses.filter((b) => {
-      // Se descarta el negocio si su ID se encuentra en la lista de pagos (excluyendo abonos)
       if (paidBusinessIds.includes(b.id)) return false;
-      // Se descarta si el negocio ya tiene un reporte hoy
       if (reportedBusinessIds.includes(String(b.id))) return false;
+      if (adeudoBusinessIds.includes(b.id)) return false;
       return true;
     });
-    console.log("Negocios asignados (sin pago ni reporte hoy) =>", assigned);
+    console.log("Negocios asignados (sin pago, reporte o adeudo hoy) =>", assigned);
     setAssignedBusinesses(assigned);
-  }, [rawBusinesses, paidBusinessIds, reportedBusinessIds]);
+  }, [rawBusinesses, paidBusinessIds, reportedBusinessIds, adeudoBusinessIds]);
 
-  // -------------------- Calcular distancia y obtener top n (excluyendo los cerrados) --------------------
+  // -------------------- Calcular distancia y obtener top 5 --------------------
   useEffect(() => {
     if (!assignedBusinesses.length || !userLocation) {
       setFilteredBusinesses([]);
@@ -222,9 +276,13 @@ const AgentDashboard = () => {
     const updated = assignedBusinesses
       .filter((b) => b.location && b.status === "activo")
       .map((b) => {
-        // Determinar si el negocio está abierto según su horario
         let isOpen = true;
-        if (b.schedule && b.schedule.days && b.schedule.openingTime && b.schedule.closingTime) {
+        if (
+          b.schedule &&
+          b.schedule.days &&
+          b.schedule.openingTime &&
+          b.schedule.closingTime
+        ) {
           const todayName = dayjs().format("dddd").toLowerCase();
           const scheduleDays = b.schedule.days.map((d) => d.toLowerCase());
           if (!scheduleDays.includes(todayName)) {
@@ -243,7 +301,6 @@ const AgentDashboard = () => {
             }
           }
         }
-        // Calcular distancia usando la fórmula de Haversine
         const [lat2, lon2] = b.location
           .replace("Lat: ", "")
           .replace("Lng: ", "")
@@ -268,7 +325,7 @@ const AgentDashboard = () => {
   // -------------------- Cálculo de distancia (Fórmula Haversine) --------------------
   const calculateDistance = (lat1, lon1, lat2, lon2) => {
     const toRad = (val) => (val * Math.PI) / 180;
-    const R = 6371; // km
+    const R = 6371;
     const dLat = toRad(lat2 - lat1);
     const dLon = toRad(lon2 - lon1);
     const a =
@@ -357,7 +414,7 @@ const AgentDashboard = () => {
       const context = canvas.getContext("2d");
       const QRCode = require("qrcode");
       await QRCode.toCanvas(canvas, docRef.id, { width: 300 });
-      
+
       const logoSrc = require("../assets/logoQr.png");
       const logoImage = await loadImage(logoSrc);
       const logoSize = 40;
@@ -366,13 +423,13 @@ const AgentDashboard = () => {
       context.fillStyle = "white";
       context.fillRect(logoX, logoY, logoSize, logoSize);
       context.drawImage(logoImage, logoX, logoY, logoSize, logoSize);
-      
+
       const businessName = newBusiness.name?.trim() || "Nombre no disponible";
       context.fillStyle = "#861E3D";
       context.font = "bold 18px Arial";
       context.textAlign = "center";
       context.fillText(businessName, canvas.width / 2, 290);
-      
+
       const qrBase64 = canvas.toDataURL("image/png");
       const storage = getStorage();
       const qrRef = ref(storage, `qr_codes/${docRef.id}.png`);
@@ -503,9 +560,13 @@ const AgentDashboard = () => {
                     timeMin,
                   };
                 }
-                // Determinar si el negocio está abierto para la búsqueda
                 let isOpen = true;
-                if (b.schedule && b.schedule.days && b.schedule.openingTime && b.schedule.closingTime) {
+                if (
+                  b.schedule &&
+                  b.schedule.days &&
+                  b.schedule.openingTime &&
+                  b.schedule.closingTime
+                ) {
                   const todayName = dayjs().format("dddd").toLowerCase();
                   const scheduleDays = b.schedule.days.map((d) => d.toLowerCase());
                   if (!scheduleDays.includes(todayName)) {
@@ -534,10 +595,7 @@ const AgentDashboard = () => {
                       className="flex items-center flex-1 no-underline text-inherit"
                     >
                       <div className="w-12 h-12 flex items-center justify-center bg-[#701730] text-white rounded-full mr-4 text-lg font-semibold">
-                        {b.name
-                          .split(" ")
-                          .map((word) => word.charAt(0))
-                          .join("")}
+                        {b.name.split(" ").map((word) => word.charAt(0)).join("")}
                       </div>
                       <div className="flex-1">
                         <h2 className="text-lg font-bold text-[#701730]">{b.name}</h2>
@@ -551,11 +609,7 @@ const AgentDashboard = () => {
                       </div>
                     </Link>
                     <div className="flex flex-col items-end gap-2">
-                      <div
-                        className={`px-3 py-1 rounded-full text-sm font-semibold ${
-                          isOpen ? "bg-green-500 text-white" : "bg-red-500 text-white"
-                        }`}
-                      >
+                      <div className={`px-3 py-1 rounded-full text-sm font-semibold ${isOpen ? "bg-green-500 text-white" : "bg-red-500 text-white"}`}>
                         {isOpen ? "Abierto" : "Cerrado"}
                       </div>
                       {b.status === "inactivo" && (
@@ -583,69 +637,38 @@ const AgentDashboard = () => {
             <img src={loadingGif} alt="Cargando..." className="w-16 h-16" />
           </div>
         ) : filteredBusinesses.length > 0 ? (
-          <>
-            <ul className="space-y-4">
-              {filteredBusinesses.map((b) => (
-                <li
-                  key={b.id}
-                  className="bg-white shadow-lg rounded-lg p-4 flex items-center justify-between"
+          <ul className="space-y-4">
+            {filteredBusinesses.map((b) => (
+              <li
+                key={b.id}
+                className="bg-white shadow-lg rounded-lg p-4 flex items-center justify-between"
+              >
+                <Link
+                  to={`/negocio/${b.id}`}
+                  className="flex items-center flex-1 no-underline text-inherit"
                 >
-                  <Link
-                    to={`/negocio/${b.id}`}
-                    className="flex items-center flex-1 no-underline text-inherit"
-                  >
-                    <div className="w-12 h-12 flex items-center justify-center bg-[#701730] text-white rounded-full mr-4 text-lg font-semibold">
-                      {b.name
-                        .split(" ")
-                        .map((word) => word.charAt(0))
-                        .join("")}
-                    </div>
-                    <div className="flex-1">
-                      <h2 className="text-lg font-bold text-[#701730]">{b.name}</h2>
-                      <p className="text-sm text-gray-600">{b.owner}</p>
-                      <p className="text-sm text-gray-500">{b.address}</p>
-                      {b.distance && (
-                        <p className="text-sm text-gray-500">
-                          Distancia: {b.distance} km - {b.time} min
-                        </p>
-                      )}
-                    </div>
-                  </Link>
-                  <div className="flex flex-col items-end gap-2">
-                    <div className="px-3 py-1 rounded-full text-sm font-semibold ml-4 bg-green-500 text-white">
-                      {b.time} min
-                    </div>
+                  <div className="w-12 h-12 flex items-center justify-center bg-[#701730] text-white rounded-full mr-4 text-lg font-semibold">
+                    {b.name.split(" ").map((word) => word.charAt(0)).join("")}
                   </div>
-                </li>
-              ))}
-            </ul>
-            {/* Botón para cargar más si hay más negocios asignados */}
-            {assignedBusinesses.filter((b) => {
-              if (!(b.location && b.status === "activo")) return false;
-              if (b.schedule && b.schedule.days && b.schedule.openingTime && b.schedule.closingTime) {
-                const todayName = dayjs().format("dddd").toLowerCase();
-                const scheduleDays = b.schedule.days.map((d) => d.toLowerCase());
-                if (!scheduleDays.includes(todayName)) return false;
-                const [openHour, openMinute] = b.schedule.openingTime.split(":").map(Number);
-                const [closeHour, closeMinute] = b.schedule.closingTime.split(":").map(Number);
-                const now = dayjs();
-                const opening = dayjs().hour(openHour).minute(openMinute).second(0);
-                let closing = dayjs().hour(closeHour).minute(closeMinute).second(0);
-                if (closing.isBefore(opening)) closing = closing.add(1, "day");
-                if (now.isBefore(opening) || now.isAfter(closing)) return false;
-              }
-              return true;
-            }).length > displayCount && (
-              <div className="flex justify-center mt-4">
-                <button
-                  onClick={() => setDisplayCount(displayCount + 5)}
-                  className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-                >
-                  Ver más negocios
-                </button>
-              </div>
-            )}
-          </>
+                  <div className="flex-1">
+                    <h2 className="text-lg font-bold text-[#701730]">{b.name}</h2>
+                    <p className="text-sm text-gray-600">{b.owner}</p>
+                    <p className="text-sm text-gray-500">{b.address}</p>
+                    {b.distance && (
+                      <p className="text-sm text-gray-500">
+                        Distancia: {b.distance} km - {b.time} min
+                      </p>
+                    )}
+                  </div>
+                </Link>
+                <div className="flex flex-col items-end gap-2">
+                  <div className="px-3 py-1 rounded-full text-sm font-semibold ml-4 bg-green-500 text-white">
+                    {b.time} min
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
         ) : (
           <p className="text-center text-white">Cargando Negocios...</p>
         )}
@@ -686,22 +709,21 @@ const AgentDashboard = () => {
               <FaTimes size={20} />
             </button>
             <BusinessForm
-        newBusiness={newBusiness}
-        setNewBusiness={setNewBusiness}
-        handleInputChange={handleInputChange}
-        handleNextStep={handleNextStep}
-        handlePreviousStep={handlePreviousStep}
-        handleFormSubmit={handleFormSubmit}
-        currentStep={currentStep}
-        handleCancel={() => setIsModalOpen(false)}
-        // Aquí se pasa solo el agente actual (el cobrador)
-        agentOptions={[
-          {
-            id: user.uid,
-            name: user.displayName || user.email || "Cobrador",
-          },
-        ]}
-      />
+              newBusiness={newBusiness}
+              setNewBusiness={setNewBusiness}
+              handleInputChange={handleInputChange}
+              handleNextStep={handleNextStep}
+              handlePreviousStep={handlePreviousStep}
+              handleFormSubmit={handleFormSubmit}
+              currentStep={currentStep}
+              handleCancel={() => setIsModalOpen(false)}
+              agentOptions={[
+                {
+                  id: user.uid,
+                  name: user.displayName || user.email || "Cobrador",
+                },
+              ]}
+            />
           </div>
         </div>
       )}
