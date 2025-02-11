@@ -1,5 +1,5 @@
 import { Link, Outlet, useNavigate } from "react-router-dom";
-import { FaHome, FaSignOutAlt, FaBriefcase, FaUsers, FaCog } from "react-icons/fa"; // Agregar FaCog
+import { FaHome, FaSignOutAlt, FaBriefcase, FaUsers, FaUserFriends, FaCog } from "react-icons/fa"; // Se agregó FaUserFriends
 import { getAuth, signOut } from "firebase/auth";
 import logo from "../assets/logo.png"; // Importa el logo
 
@@ -42,7 +42,7 @@ const MainLayout = () => {
               <span className="mt-1 text-xs">Dashboard</span>
             </Link>
           </li>
-          {/* Nueva opción de menú: Negocios */}
+          {/* Opción de menú: Negocios */}
           <li className="flex flex-col items-center group">
             <Link
               to="negocios"
@@ -53,7 +53,18 @@ const MainLayout = () => {
               <span className="mt-1 text-xs">Negocios</span>
             </Link>
           </li>
-          {/* Nueva opción de menú: Usuarios */}
+          {/* Nueva opción de menú: Agentes y Grupos */}
+          <li className="flex flex-col items-center group">
+            <Link
+              to="agentes-grupos"
+              className="flex flex-col items-center p-3 hover:bg-[#083416]/10 rounded-md transition-all"
+              title="Agentes y Grupos"
+            >
+              <FaUserFriends className="text-2xl" />
+              <span className="mt-1 text-xs">Agentes y Grupos</span>
+            </Link>
+          </li>
+          {/* Opción de menú: Usuarios */}
           <li className="flex flex-col items-center group">
             <Link
               to="usuarios"
@@ -64,7 +75,7 @@ const MainLayout = () => {
               <span className="mt-1 text-xs">Usuarios</span>
             </Link>
           </li>
-          {/* Nueva opción de menú: Ajustes */}
+          {/* Opción de menú: Ajustes */}
           <li className="flex flex-col items-center group">
             <Link
               to="ajustes"

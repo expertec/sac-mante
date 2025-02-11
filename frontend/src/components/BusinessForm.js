@@ -3,7 +3,7 @@ import { MapContainer, TileLayer, Marker, useMapEvents } from "react-leaflet";
 import { getFirestore, collection, query, where, getDocs } from "firebase/firestore";
 import L from "leaflet";
 import axios from "axios";
-import { FaTimes } from "react-icons/fa"; // Icono de cierre
+import { FaTimes } from "react-icons/fa";
 import { QRCodeCanvas } from "qrcode.react";
 import logo from "../assets/logoQr.png";
 
@@ -25,15 +25,16 @@ const BusinessForm = ({
   currentStep,
   setNewBusiness,
   handleCancel,
-  // Nueva prop opcional: si se pasa, se usarán estas opciones en lugar de las obtenidas desde Firestore.
   agentOptions,
 }) => {
   const [mapPosition, setMapPosition] = useState(null);
   const [address, setAddress] = useState("");
   const [loadingLocation, setLoadingLocation] = useState(true);
-  const [agents, setAgents] = useState([]); // Estado para almacenar los agentes
+  const [agents, setAgents] = useState([]);
+  const [errorStepOne, setErrorStepOne] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Convertir coordenadas a dirección
+  // Función para convertir coordenadas a dirección
   const fetchAddressFromCoordinates = async (lat, lng) => {
     try {
       const response = await axios.get(
@@ -41,11 +42,11 @@ const BusinessForm = ({
       );
       const fetchedAddress = response.data.display_name || "Dirección no disponible";
       setAddress(fetchedAddress);
-      setNewBusiness({
-        ...newBusiness,
+      setNewBusiness((prev) => ({
+        ...prev,
         location: `Lat: ${lat}, Lng: ${lng}`,
         address: fetchedAddress,
-      });
+      }));
     } catch (error) {
       console.error("Error al obtener la dirección:", error);
       setAddress("Dirección no disponible");
@@ -69,20 +70,20 @@ const BusinessForm = ({
         }
       );
     } else {
-      console.error("Geolocalización no está soportada por el navegador.");
+      console.error("Geolocalización no soportada.");
       setAddress("Geolocalización no soportada");
       setLoadingLocation(false);
     }
   };
 
-  // Efecto para detectar ubicación al entrar al paso 2
+  // Cuando se entra al paso 2 se detecta la ubicación
   useEffect(() => {
     if (currentStep === 2) {
       detectCurrentLocation();
     }
   }, [currentStep]);
 
-  // Efecto para obtener agentes. Si se recibe la prop agentOptions, se usan esos; de lo contrario se consultan desde Firestore.
+  // Obtener agentes desde Firestore o usar los pasados en agentOptions
   useEffect(() => {
     if (agentOptions && agentOptions.length > 0) {
       setAgents(agentOptions);
@@ -90,28 +91,25 @@ const BusinessForm = ({
     }
     const fetchAgents = async () => {
       try {
-        const db = getFirestore(); // Inicializa Firestore
-        const usersRef = collection(db, "users"); // Colección de usuarios
-        const q = query(usersRef, where("role", "==", "Cobrador")); // Filtrar por rol "Cobrador"
+        const db = getFirestore();
+        const usersRef = collection(db, "users");
+        const q = query(usersRef, where("role", "==", "Cobrador"));
         const querySnapshot = await getDocs(q);
-
         const agentsList = querySnapshot.docs.map((doc) => ({
           id: doc.id,
           ...doc.data(),
         }));
-
-        setAgents(agentsList); // Actualiza el estado con los usuarios filtrados
+        setAgents(agentsList);
       } catch (error) {
-        console.error("Error al obtener agentes desde Firestore:", error);
+        console.error("Error al obtener agentes:", error);
       }
     };
-
     fetchAgents();
   }, [agentOptions]);
 
-  // Componente para manejar eventos de marcador
+  // Componente para el marcador draggable
   const DraggableMarker = () => {
-    const map = useMapEvents({});
+    useMapEvents({});
     return (
       <Marker
         position={mapPosition}
@@ -120,29 +118,158 @@ const BusinessForm = ({
           dragend: (e) => {
             const { lat, lng } = e.target.getLatLng();
             setMapPosition({ lat, lng });
-            fetchAddressFromCoordinates(lat, lng); // Actualizar dirección y estado
+            fetchAddressFromCoordinates(lat, lng);
           },
         }}
       />
     );
   };
 
-  // Reiniciar el formulario después de finalizar el registro
+  // Alternar días de apertura mediante botones compactos
+  const toggleDay = (day) => {
+    setNewBusiness((prev) => {
+      const currentDays = prev.schedule?.days || [];
+      return {
+        ...prev,
+        schedule: {
+          ...prev.schedule,
+          days: currentDays.includes(day)
+            ? currentDays.filter((d) => d !== day)
+            : [...currentDays, day],
+        },
+      };
+    });
+  };
+
+  // Reiniciar el formulario y cerrar el modal
   const resetForm = () => {
     setNewBusiness({
       name: "",
       owner: "",
       type: "",
       phone: "",
+      quota: "",
       location: "",
       address: "",
       qrUrl: "",
-      agentId: "", // Reiniciar el agente asignado
+      agentId: "",
+      schedule: { openingTime: "", closingTime: "", days: [] },
     });
     setMapPosition(null);
     setAddress("");
-    detectCurrentLocation(); // Detectar nuevamente la ubicación actual
-    handleCancel(); // Cerrar el modal
+    setErrorStepOne("");
+    setIsSubmitting(false);
+    detectCurrentLocation();
+    handleCancel();
+  };
+
+  // Función para sanitizar el número: elimina caracteres no numéricos y asegura el prefijo "52"
+  const sanitizePhoneNumber = (phone) => {
+    const digits = phone.replace(/\D/g, "");
+    return digits.startsWith("52") ? digits : "52" + digits;
+  };
+
+  // Función para enviar la notificación vía WhatsApp al registrar el negocio.
+  // Se extrae solo el primer nombre del dueño.
+  const sendWhatsAppRegistrationTemplate = async (phone, ownerName, businessName) => {
+    const firstName = ownerName.split(" ")[0]; // Solo se toma el primer nombre
+    const whatsappPhoneId = "561128823749562"; // Reemplaza con tu Phone ID
+    const token =
+      "EAAIambJJ7DABO52OGc1qbRFiDPERKmDeX8guAq4ycIowjbrZB0NPiZB1vfpXROJ4ldw0eOsPJ7lPZBviuIUL19Y0U938ZCZAwnyZCsoHaR4K9bmbZAy1ZAIysssZBcnb2HxxptkXYL6oOda1CN65gy37y2Y7PhnXE8qfML2yAmSSHVZAuRp4ZCp9iAS6gzOmthjjZAmc"; // Reemplaza con tu token real
+    const url = `https://graph.facebook.com/v21.0/${whatsappPhoneId}/messages`;
+
+    const payload = {
+      messaging_product: "whatsapp",
+      to: phone,
+      type: "template",
+      template: {
+        name: "registro_comerciante", // Plantilla configurada en WhatsApp Business Manager
+        language: { code: "es_MX" },
+        components: [
+          {
+            type: "body",
+            parameters: [
+              { type: "text", text: firstName },
+              { type: "text", text: businessName },
+            ],
+          },
+        ],
+      },
+    };
+
+    console.log("Payload para WhatsApp (registro):", JSON.stringify(payload, null, 2));
+
+    return await axios.post(url, payload, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+    });
+  };
+
+  // Enviar notificación vía WhatsApp al completar el registro (paso 3)
+  useEffect(() => {
+    if (
+      currentStep === 3 &&
+      newBusiness.owner &&
+      newBusiness.name &&
+      newBusiness.phone
+    ) {
+      const phone = sanitizePhoneNumber(newBusiness.phone);
+      sendWhatsAppRegistrationTemplate(phone, newBusiness.owner, newBusiness.name)
+        .then((response) => {
+          console.log("Notificación de WhatsApp enviada:", response.data);
+        })
+        .catch((error) => {
+          console.error("Error al enviar la notificación de WhatsApp:", error);
+        });
+    }
+  }, [currentStep, newBusiness]);
+
+  // Función de validación para el paso 1
+  const validateStepOne = () => {
+    if (
+      !newBusiness.name.trim() ||
+      !newBusiness.owner.trim() ||
+      !newBusiness.agentId ||
+      !newBusiness.phone.trim() ||
+      !newBusiness.quota ||
+      !newBusiness.type.trim() ||
+      !newBusiness.schedule?.openingTime ||
+      !newBusiness.schedule?.closingTime ||
+      !newBusiness.schedule?.days ||
+      newBusiness.schedule.days.length === 0
+    ) {
+      return false;
+    }
+    return true;
+  };
+
+  // Función para avanzar al siguiente paso con validación
+  const handleNextStepValidation = () => {
+    if (!validateStepOne()) {
+      setErrorStepOne("Por favor, completa todos los campos obligatorios.");
+      return;
+    }
+    setErrorStepOne("");
+    handleNextStep();
+  };
+
+  // Función para enviar el formulario con validación y prevenir doble envío
+  const handleFormSubmitValidation = async () => {
+    if (!validateStepOne()) {
+      setErrorStepOne("Por favor, completa todos los campos obligatorios.");
+      return;
+    }
+    setErrorStepOne("");
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    try {
+      await handleFormSubmit();
+    } catch (error) {
+      console.error("Error al registrar el negocio:", error);
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -154,177 +281,140 @@ const BusinessForm = ({
         }
       }}
     >
-      <div className="bg-white p-6 rounded shadow-md w-[800px] max-h-[90vh] overflow-y-auto relative">
+      <div className="bg-white p-4 rounded shadow-md w-[600px] max-h-[90vh] overflow-y-auto relative">
         <button
           type="button"
           onClick={handleCancel}
-          className="absolute top-4 right-4 text-gray-500 hover:text-gray-700"
+          className="absolute top-2 right-2 text-gray-500 hover:text-gray-700"
         >
           <FaTimes size={20} />
         </button>
 
-        <h2 className="text-xl font-bold mb-4 text-gray-800">Registrar Negocio</h2>
-
         {currentStep === 1 && (
           <div>
-            <h3 className="text-lg font-semibold mb-2 text-gray-800">Paso 1: Datos Generales</h3>
-            <form>
-              <div className="mb-4">
-                <label className="block text-gray-700 mb-2">Nombre</label>
+            {/* Paso 1: Datos Generales */}
+            <form className="space-y-2">
+              <input
+                type="text"
+                name="name"
+                value={newBusiness.name}
+                onChange={handleInputChange}
+                placeholder="Nombre del Negocio"
+                className="w-full border border-gray-300 p-2 rounded text-black focus:outline-none focus:ring focus:ring-blue-300"
+              />
+              <input
+                type="text"
+                name="owner"
+                value={newBusiness.owner}
+                onChange={handleInputChange}
+                placeholder="Propietario"
+                className="w-full border border-gray-300 p-2 rounded text-black focus:outline-none focus:ring focus:ring-blue-300"
+              />
+              <select
+                name="agentId"
+                value={newBusiness.agentId || ""}
+                onChange={(e) =>
+                  setNewBusiness({ ...newBusiness, agentId: e.target.value })
+                }
+                className="w-full border border-gray-300 p-2 rounded text-black focus:outline-none focus:ring focus:ring-blue-300"
+              >
+                <option value="">Agente Asignado</option>
+                {agents.map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {agent.name || agent.email}
+                  </option>
+                ))}
+              </select>
+              <select
+                name="type"
+                value={newBusiness.type}
+                onChange={handleInputChange}
+                className="w-full border border-gray-300 p-2 rounded text-black focus:outline-none focus:ring focus:ring-blue-300"
+              >
+                <option value="">Giro Comercial</option>
+                <option value="Comida Callejera">Comida Callejera</option>
+                <option value="Bebidas y Refrescos">Bebidas y Refrescos</option>
+                <option value="Dulces y Postres">Dulces y Postres</option>
+                <option value="Artesanías y Souvenirs">Artesanías y Souvenirs</option>
+                <option value="Ropa y Accesorios">Ropa y Accesorios</option>
+                <option value="Tecnología y Accesorios">Tecnología y Accesorios</option>
+                <option value="Servicios de Belleza">Servicios de Belleza</option>
+                <option value="Juguetería y Artículos Infantiles">Juguetería y Artículos Infantiles</option>
+                <option value="Flores y Plantas">Flores y Plantas</option>
+                <option value="Productos Ecológicos y Naturales">Productos Ecológicos y Naturales</option>
+                <option value="Libros y Revistas">Libros y Revistas</option>
+                <option value="Otro">Otro</option>
+              </select>
+              <input
+                type="text"
+                name="phone"
+                value={newBusiness.phone}
+                onChange={handleInputChange}
+                placeholder="Whatsapp"
+                className="w-full border border-gray-300 p-2 rounded text-black focus:outline-none focus:ring focus:ring-blue-300"
+              />
+              <input
+                type="number"
+                name="quota"
+                value={newBusiness.quota || ""}
+                onChange={handleInputChange}
+                placeholder="Cuota"
+                className="w-full border border-gray-300 p-2 rounded text-black focus:outline-none focus:ring focus:ring-blue-300"
+              />
+              <div className="grid grid-cols-2 gap-2">
                 <input
-                  type="text"
-                  name="name"
-                  value={newBusiness.name}
-                  onChange={handleInputChange}
-                  className="w-full border border-gray-300 p-2 rounded text-gray-800"
-                  required
-                />
-              </div>
-              <div className="mb-4">
-                <label className="block text-gray-700 mb-2">Propietario</label>
-                <input
-                  type="text"
-                  name="owner"
-                  value={newBusiness.owner}
-                  onChange={handleInputChange}
-                  className="w-full border border-gray-300 p-2 text-gray-800 rounded"
-                  required
-                />
-              </div>
-              <div className="mb-4">
-                <label className="block text-gray-700 mb-2">Agente Asignado</label>
-                <select
-                  name="agentId"
-                  value={newBusiness.agentId || ""}
+                  type="time"
+                  name="openingTime"
+                  value={newBusiness.schedule?.openingTime || ""}
                   onChange={(e) =>
-                    setNewBusiness({ ...newBusiness, agentId: e.target.value })
+                    setNewBusiness((prev) => ({
+                      ...prev,
+                      schedule: { ...prev.schedule, openingTime: e.target.value },
+                    }))
                   }
-                  className="w-full border border-gray-300 p-2 text-gray-800 rounded"
-                  required
-                >
-                  <option value="">Selecciona un agente</option>
-                  {agents.map((agent) => (
-                    <option key={agent.id} value={agent.id}>
-                      {agent.name || agent.email}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="mb-4">
-                <label className="block text-gray-700 mb-2">Giro Comercial</label>
-                <select
-                  name="type"
-                  value={newBusiness.type}
-                  onChange={handleInputChange}
-                  className="w-full border border-gray-300 p-2 text-gray-800 rounded"
-                  required
-                >
-                  <option value="">Selecciona una opción</option>
-                  <option value="Alimentos">Alimentos</option>
-                  <option value="Comercio">Comercio</option>
-                  <option value="Servicio">Servicio</option>
-                </select>
-              </div>
-              <div className="mb-4">
-                <label className="block text-gray-700 mb-2">Teléfono</label>
+                  placeholder="Apertura"
+                  className="w-full border border-gray-300 p-2 rounded text-black focus:outline-none focus:ring focus:ring-blue-300"
+                />
                 <input
-                  type="text"
-                  name="phone"
-                  value={newBusiness.phone}
-                  onChange={handleInputChange}
-                  className="w-full border border-gray-300 p-2 text-gray-800 rounded"
-                  required
+                  type="time"
+                  name="closingTime"
+                  value={newBusiness.schedule?.closingTime || ""}
+                  onChange={(e) =>
+                    setNewBusiness((prev) => ({
+                      ...prev,
+                      schedule: { ...prev.schedule, closingTime: e.target.value },
+                    }))
+                  }
+                  placeholder="Cierre"
+                  className="w-full border border-gray-300 p-2 rounded text-black focus:outline-none focus:ring focus:ring-blue-300"
                 />
               </div>
-              <div className="mb-4">
-                <label className="block text-gray-700 mb-2">Cuota</label>
-                <input
-                  type="number"
-                  name="quota"
-                  value={newBusiness.quota || ""}
-                  onChange={handleInputChange}
-                  className="w-full border border-gray-300 p-2 text-gray-800 rounded"
-                  placeholder="Ingrese la cuota del negocio"
-                  required
-                />
+              {/* Botones para seleccionar días de apertura */}
+              <div className="flex flex-wrap gap-1">
+                {["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"].map((day) => (
+                  <button
+                    key={day}
+                    type="button"
+                    onClick={() => toggleDay(day)}
+                    className={`px-2 py-1 border rounded text-xs transition-colors ${
+                      newBusiness.schedule?.days?.includes(day)
+                        ? "bg-blue-500 text-white border-blue-500"
+                        : "bg-white text-gray-700 hover:bg-blue-50"
+                    }`}
+                  >
+                    {day.substring(0, 3)}
+                  </button>
+                ))}
               </div>
-              <div className="mb-4 text-gray-800">
-                <label className="block text-gray-700 mb-2">Horario</label>
-                <div className="flex gap-4">
-                  <div className="flex-1">
-                    <label className="block text-gray-700 text-sm mb-1">Apertura</label>
-                    <input
-                      type="time"
-                      name="openingTime"
-                      value={newBusiness.schedule?.openingTime || ""}
-                      onChange={(e) =>
-                        setNewBusiness((prev) => ({
-                          ...prev,
-                          schedule: {
-                            ...prev.schedule,
-                            openingTime: e.target.value,
-                          },
-                        }))
-                      }
-                      className="w-full border border-gray-300 p-2 rounded"
-                      required
-                    />
-                  </div>
-                  <div className="flex-1 text-gray-800">
-                    <label className="block text-gray-700 text-sm mb-1">Cierre</label>
-                    <input
-                      type="time"
-                      name="closingTime"
-                      value={newBusiness.schedule?.closingTime || ""}
-                      onChange={(e) =>
-                        setNewBusiness((prev) => ({
-                          ...prev,
-                          schedule: {
-                            ...prev.schedule,
-                            closingTime: e.target.value,
-                          },
-                        }))
-                      }
-                      className="w-full border border-gray-300 p-2 rounded"
-                      required
-                    />
-                  </div>
-                </div>
-              </div>
-              <div className="mb-4">
-                <label className="block text-gray-700 mb-2">Días de apertura</label>
-                <div className="grid grid-cols-3 gap-2 text-gray-800">
-                  {["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"].map((day) => (
-                    <label key={day} className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        value={day}
-                        checked={newBusiness.schedule?.days?.includes(day) || false}
-                        onChange={(e) => {
-                          const isChecked = e.target.checked;
-                          setNewBusiness((prev) => ({
-                            ...prev,
-                            schedule: {
-                              ...prev.schedule,
-                              days: isChecked
-                                ? [...(prev.schedule?.days || []), day]
-                                : prev.schedule?.days.filter((d) => d !== day),
-                            },
-                          }));
-                        }}
-                        className="form-checkbox"
-                      />
-                      {day}
-                    </label>
-                  ))}
-                </div>
-              </div>
-              <div className="flex justify-end">
+              {/* Mostrar error de validación */}
+              {errorStepOne && (
+                <p className="text-red-500 text-xs">{errorStepOne}</p>
+              )}
+              <div className="flex justify-end mt-2">
                 <button
                   type="button"
-                  onClick={handleNextStep}
-                  className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                  onClick={handleNextStepValidation}
+                  className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 transition-colors text-sm"
                 >
                   Siguiente
                 </button>
@@ -335,51 +425,55 @@ const BusinessForm = ({
 
         {currentStep === 2 && (
           <div>
-            <h3 className="text-lg font-semibold mb-2">Paso 2: Ubicación</h3>
+            {/* Paso 2: Ubicación */}
+            <div className="text-center mb-2 text-gray-800 font-semibold">Ubicación</div>
             {loadingLocation ? (
-              <p className="text-center text-gray-500">Cargando ubicación...</p>
+              <p className="text-center text-gray-500 text-sm">Cargando ubicación...</p>
             ) : (
               <>
-                <p className="mb-4 text-gray-600">
-                  Arrastra el marcador para ajustar la ubicación del negocio.
+                <p className="mb-2 text-gray-600 text-center text-xs">
+                  Arrastra el marcador para ajustar la ubicación.
                 </p>
-                <div className="h-64 w-full mb-4">
-                  <MapContainer
-                    center={[mapPosition.lat, mapPosition.lng]}
-                    zoom={15}
-                    className="h-full w-full rounded-lg"
-                  >
-                    <TileLayer
-                      url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                      attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                    />
-                    <DraggableMarker />
-                  </MapContainer>
+                <div className="h-56 w-full mb-2">
+                  {mapPosition && (
+                    <MapContainer
+                      center={[mapPosition.lat, mapPosition.lng]}
+                      zoom={15}
+                      className="h-full w-full rounded"
+                    >
+                      <TileLayer
+                        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                        attribution='&copy; OpenStreetMap contributors'
+                      />
+                      <DraggableMarker />
+                    </MapContainer>
+                  )}
                 </div>
-                <p className="mb-4 text-gray-700">
-                  Dirección detectada: <span className="font-semibold">{address}</span>
+                <p className="mb-2 text-gray-700 text-center text-xs">
+                  Dirección: <span className="font-semibold">{address}</span>
                 </p>
                 <div className="flex justify-between">
                   <button
                     type="button"
                     onClick={handleCancel}
-                    className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                    className="bg-red-500 text-white px-3 py-1 rounded hover:bg-red-600 text-xs"
                   >
                     Cancelar
                   </button>
                   <button
                     type="button"
                     onClick={handlePreviousStep}
-                    className="bg-gray-400 text-white px-4 py-2 rounded hover:bg-gray-500"
+                    className="bg-gray-400 text-white px-3 py-1 rounded hover:bg-gray-500 text-xs"
                   >
                     Atrás
                   </button>
                   <button
                     type="button"
-                    onClick={handleFormSubmit}
-                    className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                    onClick={handleFormSubmitValidation}
+                    disabled={isSubmitting}
+                    className={`bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600 text-xs ${isSubmitting ? "opacity-50 cursor-not-allowed" : ""}`}
                   >
-                    Registrar
+                    {isSubmitting ? "Registrando..." : "Registrar"}
                   </button>
                 </div>
               </>
@@ -388,10 +482,12 @@ const BusinessForm = ({
         )}
 
         {currentStep === 3 && (
-          <div>
-            <h3 className="text-lg font-semibold mb-2">Negocio Registrado Exitosamente</h3>
-            <p className="mb-4">Escanea el código QR para identificar este negocio:</p>
-            <div className="w-[300px] h-[300px] mx-auto">
+          <div className="text-center">
+            <h3 className="text-lg font-semibold mb-2 text-gray-800">Negocio Registrado</h3>
+            <p className="mb-2 text-xs text-gray-700">
+              Escanea el código QR para identificar este negocio:
+            </p>
+            <div className="w-64 h-64 mx-auto mb-2">
               {newBusiness.qrUrl ? (
                 <img
                   src={newBusiness.qrUrl}
@@ -399,15 +495,15 @@ const BusinessForm = ({
                   className="w-full h-full object-contain"
                 />
               ) : (
-                <p className="text-center text-gray-500">Cargando QR...</p>
+                <p className="text-center text-gray-500 text-xs">Cargando QR...</p>
               )}
             </div>
-            <div className="flex justify-between mt-4">
+            <div className="flex justify-between">
               {newBusiness.qrUrl && (
                 <a
                   href={newBusiness.qrUrl}
                   download={`${newBusiness.name || "Negocio"}_QR.png`}
-                  className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 text-center"
+                  className="bg-green-500 text-white px-3 py-1 rounded hover:bg-green-600 text-xs text-center"
                 >
                   Descargar QR
                 </a>
@@ -415,7 +511,7 @@ const BusinessForm = ({
               <button
                 type="button"
                 onClick={resetForm}
-                className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                className="bg-blue-500 text-white px-3 py-1 rounded hover:bg-blue-600 text-xs"
               >
                 Finalizar
               </button>

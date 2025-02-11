@@ -9,10 +9,10 @@ import {
   doc,
 } from "firebase/firestore";
 import { getStorage, ref, uploadString, getDownloadURL } from "firebase/storage";
+
 import BusinessForm from "../components/BusinessForm";
 import { FaTimes } from "react-icons/fa";
 import { getAuth } from "firebase/auth";
-
 import { QRCodeCanvas } from "qrcode.react";
 import dayjs from "dayjs";
 
@@ -46,6 +46,7 @@ const BusinessesPage = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [currentStep, setCurrentStep] = useState(1);
   const [newBusinesses, setNewBusinesses] = useState([]);
+  // Agregamos el campo agentId en el estado inicial
   const [newBusiness, setNewBusiness] = useState({
     name: "",
     address: "", // Agregado campo address
@@ -54,6 +55,7 @@ const BusinessesPage = () => {
     owner: "",
     type: "",
     quota: 0, // Nuevo campo
+    agentId: "", // Agregado para almacenar el agente asignado
     creatorId: userId || "unknown",
     createdAt: null,
     status: "activo",
@@ -65,6 +67,9 @@ const BusinessesPage = () => {
 
   // Estado para el buscador
   const [searchQuery, setSearchQuery] = useState("");
+
+  // Nuevo estado para mapear los agentes (ID → Nombre)
+  const [agentMapping, setAgentMapping] = useState({});
 
   // 3. Función para descargar QR
   const downloadQR = (qrUrl, name) => {
@@ -94,7 +99,7 @@ const BusinessesPage = () => {
     fetchBusinesses();
   }, [fetchBusinesses]);
 
-  // 5. Suscripción en tiempo real
+  // 5. Suscripción en tiempo real para negocios
   useEffect(() => {
     const unsubscribe = onSnapshot(
       collection(db, "negocios"),
@@ -109,11 +114,25 @@ const BusinessesPage = () => {
         console.error("Error al obtener datos en tiempo real:", error);
       }
     );
-
     return () => unsubscribe();
   }, [db]);
 
-  // 6. Manejar cambios de campos de formulario
+  // 6. Suscripción en tiempo real para agentes (usuarios con rol "Cobrador")
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "users"), (snapshot) => {
+      const mapping = {};
+      snapshot.docs.forEach((docSnap) => {
+        const data = docSnap.data();
+        if (data.role === "Cobrador" && data.name) {
+          mapping[docSnap.id] = data.name;
+        }
+      });
+      setAgentMapping(mapping);
+    });
+    return () => unsub();
+  }, [db]);
+
+  // 7. Manejar cambios de campos de formulario
   const handleInputChange = (e) => {
     const { name, value } = e.target;
     setNewBusiness({ ...newBusiness, [name]: value });
@@ -127,7 +146,7 @@ const BusinessesPage = () => {
     if (currentStep > 1) setCurrentStep(currentStep - 1);
   };
 
-  // 7. Obtener ubicación
+  // 8. Obtener ubicación
   const detectLocation = () => {
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
@@ -147,7 +166,7 @@ const BusinessesPage = () => {
     }
   };
 
-  // 8. Registrar negocio
+  // 9. Registrar negocio
   const handleFormSubmit = async (e) => {
     if (e && e.preventDefault) {
       e.preventDefault();
@@ -237,7 +256,7 @@ const BusinessesPage = () => {
   };
 
   /**
-   * 9. Cambiar el estado del negocio entre "activo" y "inactivo".
+   * 10. Cambiar el estado del negocio entre "activo" e "inactivo".
    * Muestra una alerta de confirmación con Tailwind.
    */
   const handleStatusChange = async (businessId, newStatus) => {
@@ -273,7 +292,7 @@ const BusinessesPage = () => {
   };
 
   /**
-   * 10. Filtrar negocios según la búsqueda.
+   * 11. Filtrar negocios según la búsqueda.
    */
   const filteredBusinesses = newBusinesses.filter((business) => {
     const query = searchQuery.toLowerCase();
@@ -281,7 +300,7 @@ const BusinessesPage = () => {
       (business.name && business.name.toLowerCase().includes(query)) ||
       (business.owner && business.owner.toLowerCase().includes(query)) ||
       (business.type && business.type.toLowerCase().includes(query)) ||
-      (business.address && business.address.toLowerCase().includes(query)) // Usar address
+      (business.address && business.address.toLowerCase().includes(query))
     );
   });
 
@@ -289,7 +308,7 @@ const BusinessesPage = () => {
     <div className="container mx-auto p-4 min-h-screen overflow-auto">
       <h1 className="text-2xl font-bold mb-4">Lista de Negocios</h1>
 
-      {/* 11. Mostrar alerta, si existe */}
+      {/* 12. Mostrar alerta, si existe */}
       {alert && (
         <div
           className={`mb-4 p-3 rounded border text-center ${
@@ -302,7 +321,7 @@ const BusinessesPage = () => {
         </div>
       )}
 
-      {/* 12. Contenedor superior: Botón de registro y Buscador */}
+      {/* 13. Contenedor superior: Botón de registro y Buscador */}
       <div className="flex flex-col md:flex-row justify-between items-center mb-4">
         <button
           className="bg-blue-500 text-white px-4 py-2 rounded mb-2 md:mb-0 hover:bg-blue-600"
@@ -311,7 +330,7 @@ const BusinessesPage = () => {
           Registrar Negocio
         </button>
 
-        {/* 13. Campo de Búsqueda */}
+        {/* 14. Campo de Búsqueda */}
         <input
           type="text"
           placeholder="Buscar por nombre, propietario, tipo..."
@@ -321,15 +340,16 @@ const BusinessesPage = () => {
         />
       </div>
 
-      {/* 14. Tabla de Negocios Filtrados */}
+      {/* 15. Tabla de Negocios Filtrados */}
       <div className="overflow-x-auto">
         <table className="min-w-full bg-white shadow-md rounded-lg">
           <thead>
             <tr className="bg-gray-200 text-gray-700 uppercase text-sm leading-normal">
               <th className="py-3 px-6 text-left">Nombre</th>
-              <th className="py-3 px-6 text-left">Ubicación</th> {/* Dirección */}
+              <th className="py-3 px-6 text-left">Ubicación</th>
               <th className="py-3 px-6 text-left">Teléfono</th>
               <th className="py-3 px-6 text-left">Propietario</th>
+              <th className="py-3 px-6 text-left">Agente Asignado</th>
               <th className="py-3 px-6 text-left">Tipo</th>
               <th className="py-3 px-6 text-left">Cuota</th>
               <th className="py-3 px-6 text-left">Estado</th>
@@ -348,15 +368,17 @@ const BusinessesPage = () => {
                     {business.name}
                   </td>
                   <td className="py-3 px-6 text-left">
-                    {business.address || "No disponible"} {/* Mostrar address */}
+                    {business.address || "No disponible"}
                   </td>
                   <td className="py-3 px-6 text-left">{business.phone}</td>
                   <td className="py-3 px-6 text-left">{business.owner}</td>
+                  <td className="py-3 px-6 text-left">
+                    {agentMapping[business.agentId] || "N/A"}
+                  </td>
                   <td className="py-3 px-6 text-left">{business.type}</td>
                   <td className="py-3 px-6 text-left">
                     ${business.quota || "0.00"}
                   </td>
-                  {/* 15. Reemplazar texto de estado por SwitchButton */}
                   <td className="py-3 px-6 text-left">
                     <SwitchButton
                       isActive={business.status === "activo"}
@@ -371,7 +393,9 @@ const BusinessesPage = () => {
                   <td className="py-3 px-6 text-center">
                     {business.qrUrl ? (
                       <button
-                        onClick={() => downloadQR(business.qrUrl, business.name)}
+                        onClick={() =>
+                          downloadQR(business.qrUrl, business.name)
+                        }
                         className="bg-green-500 text-white px-2 py-1 rounded hover:bg-green-600"
                       >
                         Descargar QR
@@ -385,7 +409,7 @@ const BusinessesPage = () => {
             ) : (
               <tr>
                 <td
-                  colSpan="8"
+                  colSpan="9"
                   className="text-center py-3 text-gray-500 italic"
                 >
                   No hay negocios disponibles.

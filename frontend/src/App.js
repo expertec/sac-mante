@@ -11,6 +11,7 @@ import UsersPage from "./pages/UsersPage"; // Importación del UsersPage
 import SingleBusinessPage from "./pages/SingleBusinessPage";
 import PaymentReceipt from "./components/PaymentReceipt";
 import SettingsPage from "./pages/SettingsPage";
+import AgentesGrupos from "./components/AgentesGrupos";
 
 
 
@@ -54,6 +55,7 @@ const App = () => {
           {/* Ruta para Usuarios */}
           <Route path="usuarios" element={<UsersPage />} />
           <Route path="ajustes" element={<SettingsPage />} />
+          <Route path="agentes-grupos" element={<AgentesGrupos />} />
         </Route>
 
         {/* Ruta protegida para agentes */}

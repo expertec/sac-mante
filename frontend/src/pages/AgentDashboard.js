@@ -26,6 +26,7 @@ import loadingGif from "../assets/carga-gps.gif";
 import BusinessForm from "../components/BusinessForm";
 import { FaTimes } from "react-icons/fa";
 import { MdOutlineAddBusiness, MdQrCodeScanner } from "react-icons/md";
+import cargandoNegocio from "../assets/cargandoNegocio.gif";
 
 // Configurar dayjs
 dayjs.locale("es");
@@ -670,7 +671,11 @@ const AgentDashboard = () => {
             ))}
           </ul>
         ) : (
-          <p className="text-center text-white">Cargando Negocios...</p>
+          
+          <div className="flex flex-col items-center justify-center min-h-screen">
+        <img src={cargandoNegocio} alt="Cargando negocio..." className="w-32 h-32" />
+        <p className="mt-4 text-lg">Cargando negocios...</p>
+      </div>
         )}
       </div>
 

@@ -132,7 +132,9 @@ const AdminHome = () => {
   // Estados para el calendario y fecha del reporte
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth());
+  // Declaramos paymentsData para agrupar los pagos por día
   const [paymentsData, setPaymentsData] = useState({});
+  // Inicializamos selectedReportDate con la fecha actual
   const [selectedReportDate, setSelectedReportDate] = useState(dayjs().format("YYYY-MM-DD"));
 
   // Estado para la pestaña activa ("diarios" o "historicos")
@@ -153,9 +155,15 @@ const AdminHome = () => {
     return () => unsub();
   }, [db]);
 
+  // Actualizar selectedReportDate: si el mes y año seleccionados son los actuales,
+  // se usa el día actual; de lo contrario, se usa el primer día del mes seleccionado.
   useEffect(() => {
-    const defaultDate = dayjs(new Date(selectedYear, selectedMonth, 1)).format("YYYY-MM-DD");
-    setSelectedReportDate(defaultDate);
+    const today = new Date();
+    if (selectedYear === today.getFullYear() && selectedMonth === today.getMonth()) {
+      setSelectedReportDate(dayjs(today).format("YYYY-MM-DD"));
+    } else {
+      setSelectedReportDate(dayjs(new Date(selectedYear, selectedMonth, 1)).format("YYYY-MM-DD"));
+    }
   }, [selectedYear, selectedMonth]);
 
   const minDate = dayjs(new Date(selectedYear, selectedMonth, 1)).format("YYYY-MM-DD");
@@ -241,6 +249,26 @@ const AdminHome = () => {
     setSelectedMonthPayments(sumMonth);
     setPaymentsData(map);
   }, [allCobros, selectedMonth, selectedYear]);
+
+  // NUEVO useEffect: Obtener y contar los negocios activos e inactivos
+  useEffect(() => {
+    const negociosRef = collection(db, "negocios");
+    const unsubscribe = onSnapshot(negociosRef, (snapshot) => {
+      let activeCount = 0;
+      let inactiveCount = 0;
+      snapshot.docs.forEach((docSnap) => {
+        const data = docSnap.data();
+        if (data.status === "activo") {
+          activeCount++;
+        } else if (data.status === "inactivo") {
+          inactiveCount++;
+        }
+      });
+      setActiveBusinesses(activeCount);
+      setInactiveBusinesses(inactiveCount);
+    });
+    return () => unsubscribe();
+  }, [db]);
 
   // Función para descargar PDF (mantiene la lógica original)
   const handleDownloadPDF = () => {
