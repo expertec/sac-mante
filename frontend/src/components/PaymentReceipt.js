@@ -4,261 +4,159 @@ import { useLocation, useNavigate } from "react-router-dom";
 import axios from "axios";
 import { FaArrowLeft } from "react-icons/fa";
 
+// ========== Helpers de Retry y Utils ==========
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withRetry(requestFn, maxAttempts = 3, baseDelay = 2000) {
+  let lastErr;
+  for (let i = 1; i <= maxAttempts; i++) {
+    try {
+      return await requestFn();
+    } catch (err) {
+      lastErr = err;
+      const isLast = i === maxAttempts;
+      if (isLast) break;
+      const jitter = Math.floor(Math.random() * 500);
+      await sleep(baseDelay * i + jitter); // 2s, 4s, 6s (+jitter)
+    }
+  }
+  throw lastErr;
+}
+
+// Normalizador de teléfono MX a 521XXXXXXXXXX (JID sin @)
+function toWhatsAppJid(phone) {
+  let num = String(phone).replace(/\D/g, "");
+  if (num.length === 10) return "521" + num;
+  if (num.length === 12 && num.startsWith("52") && num[2] !== "1")
+    return "521" + num.slice(2);
+  if (num.length === 13 && num.startsWith("521")) return num;
+  return num;
+}
+
 const PaymentReceipt = () => {
   const navigate = useNavigate();
   const locationState = useLocation().state || {};
 
-  // Dummy de prueba (solo para desarrollo; en producción se espera recibir la transacción dinámica)
+  // Dummy para pruebas locales; en producción espera `location.state.transaction`
   const dummyTransaction = {
-    businessPhone: "8311760335", // Número de prueba
+    businessPhone: "8311760335",
     businessName: "Mi Negocio de Prueba",
-    receiptUrl: "https://via.placeholder.com/300", // URL dummy para la imagen del comprobante
+    receiptUrl: "https://via.placeholder.com/300",
     agentName: "Sergio",
-    ownerName: "Dueño Prueba", // Nombre del propietario
+    ownerName: "Dueño Prueba",
     date: new Date().toISOString(),
     dayAmount: 20.0,
     totalDebt: 200.0,
-    totalAmount: 50.0, // Monto del abono, por ejemplo
-    tipo: "pago", // Puede ser "adeudo", "abono" o "pago"
+    totalAmount: 50.0,
+    tipo: "pago", // "adeudo" | "abono" | "pago"
   };
 
-  // Se utiliza el objeto recibido por state o el dummy para pruebas
   const transaction = locationState.transaction || dummyTransaction;
 
-  const [alert, setAlert] = useState(null);
+  const [alert, setAlert] = useState(null); // {type: 'success'|'error'|'info', message: string}
+  const [isSending, setIsSending] = useState(false);
   const [hasSentWhatsapp, setHasSentWhatsapp] = useState(false);
-
-  // useRef para evitar envíos dobles
   const sentRef = useRef(false);
 
-  // Función para sanitizar el número: elimina caracteres no numéricos y asegura el prefijo "52"
-  const sanitizePhoneNumber = (phone) => {
-    const digits = phone.replace(/\D/g, "");
-    return digits.startsWith("52") ? digits : "52" + digits;
+  const backendUrl = process.env.REACT_APP_BACKEND_URL;
+
+  const receiptPortalUrl = "http://sac.igob.mx/recibos";
+
+  const captionFor = (t) => {
+    const baseText =
+      t?.tipo === "adeudo"
+        ? `Hola ${t.businessName || ""}, se registró tu adeudo del día.`
+        : t?.tipo === "abono"
+        ? `Hola ${t.businessName || ""}, se registró tu abono con éxito.`
+        : `Hola ${t?.businessName || ""}, tu pago del día de hoy quedó registrado con éxito.`;
+
+    return `${baseText} Confirme el registro de sus pagos y obtenga sus comprobantes en: ${receiptPortalUrl}`;
   };
 
-  const sendWhatsAppImageTemplate = async (phone, imageUrl, ownerName, date) => {
-    // Extrae solo el primer nombre
-    const ownerFirstName = ownerName.trim().split(" ")[0];
-  
-    const whatsappPhoneId = "561128823749562"; // Tu Phone ID
-    const token = "EAAIambJJ7DABO52OGc1qbRFiDPERKmDeX8guAq4ycIowjbrZB0NPiZB1vfpXROJ4ldw0eOsPJ7lPZBviuIUL19Y0U938ZCZAwnyZCsoHaR4K9bmbZAy1ZAIysssZBcnb2HxxptkXYL6oOda1CN65gy37y2Y7PhnXE8qfML2yAmSSHVZAuRp4ZCp9iAS6gzOmthjjZAmc"; // Reemplaza por tu token real
-    const url = `https://graph.facebook.com/v21.0/${whatsappPhoneId}/messages`;
-  
-    const payload = {
-      messaging_product: "whatsapp",
-      to: phone,
-      type: "template",
-      template: {
-        name: "recibo_pago_mante", // Plantilla para pagos
-        language: { code: "es_MX" },
-        components: [
-          {
-            type: "header",
-            parameters: [{ type: "image", image: { link: imageUrl } }],
-          },
-          {
-            type: "body",
-            parameters: [
-              { type: "text", text: ownerFirstName }, // Se envía solo el primer nombre
-              { type: "text", text: date },
-            ],
-          },
-        ],
-      },
-    };
-  
-    console.log("Payload para WhatsApp (pago):", JSON.stringify(payload, null, 2));
-  
-    return axios.post(url, payload, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-    });
-  };
+  async function sendViaRender({ phone, imageUrl, caption }) {
+    return withRetry(
+      () =>
+        axios.post(
+          `${backendUrl}/api/whatsapp/send-image`,
+          { phone, imageUrl, caption },
+          { timeout: 15000 }
+        ),
+      3, // intentos
+      2000 // delay base
+    );
+  }
 
-  // Función para enviar el mensaje de WhatsApp para adeudos.
-  // Se añade el símbolo de moneda a los montos.
-  const sendWhatsAppDebtTemplate = async (
-    phone,
-    imageUrl, // Se conserva para registro interno (no se envía)
-    businessName,
-    agentName, // Se mantiene el parámetro, pero no se utilizará
-    date,
-    dayAmount,
-    totalDebt,
-    ownerName // Recibimos el nombre completo
-  ) => {
-    const whatsappPhoneId = "561128823749562"; // Tu Phone ID
-    const token =
-      "EAAIambJJ7DABO52OGc1qbRFiDPERKmDeX8guAq4ycIowjbrZB0NPiZB1vfpXROJ4ldw0eOsPJ7lPZBviuIUL19Y0U938ZCZAwnyZCsoHaR4K9bmbZAy1ZAIysssZBcnb2HxxptkXYL6oOda1CN65gy37y2Y7PhnXE8qfML2yAmSSHVZAuRp4ZCp9iAS6gzOmthjjZAmc"; // Reemplaza por tu token real
-    const url = `https://graph.facebook.com/v21.0/${whatsappPhoneId}/messages`;
-  
-    // Extraer el primer nombre del dueño
-    const ownerFirstName = ownerName.trim().split(" ")[0];
-  
-    const payload = {
-      messaging_product: "whatsapp",
-      to: phone,
-      type: "template",
-      template: {
-        name: "registro_adeudo", // Plantilla para adeudos
-        language: { code: "es_MX" },
-        components: [
-          {
-            type: "header",
-            parameters: [{ type: "text", text: businessName }],
-          },
-          {
-            type: "body",
-            parameters: [
-              { type: "text", text: ownerFirstName }, // Se envía solo el primer nombre
-              { type: "text", text: businessName },
-              { type: "text", text: date },
-              { type: "text", text: "$" + dayAmount.toFixed(2) },
-              { type: "text", text: "$" + totalDebt.toFixed(2) },
-            ],
-          },
-        ],
-      },
-    };
-  
-    console.log("Payload para WhatsApp (adeudo):", JSON.stringify(payload, null, 2));
-    return axios.post(url, payload, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-    });
-  };
-  
-  // Función para enviar el mensaje de WhatsApp para abono.
-  // Se añade el símbolo de moneda al saldo agregado.
-  const sendWhatsAppAbonoTemplate = async (
-    phone,
-    ownerName,
-    addedBalance,
-    businessName
-  ) => {
-    const whatsappPhoneId = "561128823749562"; // Tu Phone ID
-    const token =
-      "EAAIambJJ7DABO52OGc1qbRFiDPERKmDeX8guAq4ycIowjbrZB0NPiZB1vfpXROJ4ldw0eOsPJ7lPZBviuIUL19Y0U938ZCZAwnyZCsoHaR4K9bmbZAy1ZAIysssZBcnb2HxxptkXYL6oOda1CN65gy37y2Y7PhnXE8qfML2yAmSSHVZAuRp4ZCp9iAS6gzOmthjjZAmc"; // Reemplaza por tu token real
-    const url = `https://graph.facebook.com/v21.0/${whatsappPhoneId}/messages`;
-
-    const payload = {
-      messaging_product: "whatsapp",
-      to: phone,
-      type: "template",
-      template: {
-        name: "notificacion_abono", // Plantilla para abono (configúrala sin header)
-        language: { code: "es_MX" },
-        components: [
-          {
-            type: "body",
-            parameters: [
-              { type: "text", text: ownerName },
-              { type: "text", text: "$" + addedBalance.toFixed(2) },
-              { type: "text", text: businessName },
-            ],
-          },
-        ],
-      },
-    };
-
-    console.log("Payload para WhatsApp (abono):", JSON.stringify(payload, null, 2));
-    return axios.post(url, payload, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-    });
-  };
-
-  // Función que decide qué plantilla enviar según el tipo de transacción.
   const handleSendReceiptWhatsApp = async () => {
     try {
+      if (!backendUrl) {
+        setAlert({
+          type: "error",
+          message:
+            "Falta REACT_APP_BACKEND_URL en el frontend. Configúrala y vuelve a compilar.",
+        });
+        return;
+      }
       if (!transaction || !transaction.receiptUrl) {
         setAlert({ type: "error", message: "No se encontró la URL del comprobante." });
         return;
       }
-      if (!transaction.businessPhone || !transaction.businessName) {
-        setAlert({
-          type: "error",
-          message: "No se encontró el número de teléfono o el nombre del negocio en la transacción.",
-        });
-        return;
-      }
 
-      const phoneNumber = sanitizePhoneNumber(transaction.businessPhone);
-      let dateText = "";
-      if (transaction.date && typeof transaction.date === "object" && transaction.date.seconds) {
-        dateText = new Date(transaction.date.seconds * 1000).toLocaleDateString();
-      } else if (transaction.date) {
-        dateText = new Date(transaction.date).toLocaleDateString();
+      setIsSending(true);
+      setAlert({ type: "info", message: "Enviando por WhatsApp..." });
+
+      const phoneFormatted = toWhatsAppJid(transaction.businessPhone);
+      const caption = captionFor(transaction);
+
+      const response = await sendViaRender({
+        phone: phoneFormatted,
+        imageUrl: transaction.receiptUrl,
+        caption,
+      });
+
+      const ok = response?.data?.success ?? response?.status === 200;
+      if (ok) {
+        setAlert({ type: "success", message: "Recibo enviado por WhatsApp exitosamente." });
+        setHasSentWhatsapp(true);
+        sentRef.current = true;
       } else {
-        dateText = new Date().toLocaleDateString();
+        setAlert({ type: "error", message: "No se pudo enviar el recibo por WhatsApp." });
       }
-
-      const { businessName, receiptUrl, agentName, dayAmount, totalDebt, tipo } = transaction;
-      let response;
-      if (tipo === "adeudo") {
-        response = await sendWhatsAppDebtTemplate(
-          phoneNumber,
-          receiptUrl,
-          businessName,
-          agentName || "Cliente",
-          dateText,
-          dayAmount || 0,
-          totalDebt || 0,
-          transaction.ownerName || "Dueño"
-        );
-      }
-       else if (tipo === "abono") {
-        const ownerName = transaction.ownerName || "Dueño";
-        response = await sendWhatsAppAbonoTemplate(
-          phoneNumber,
-          ownerName,
-          transaction.totalAmount || 0,
-          businessName
-        );
-      } else {
-        // Caso "pago": se envía el primer nombre del propietario.
-        const ownerName = transaction.ownerName || "Dueño";
-        response = await sendWhatsAppImageTemplate(
-          phoneNumber,
-          receiptUrl,
-          ownerName,
-          dateText
-        );
-      }
-
-      console.log("Respuesta de WhatsApp API:", response.data);
-      setAlert({ type: "success", message: "Mensaje enviado con éxito" });
-      setHasSentWhatsapp(true);
-      sentRef.current = true;
     } catch (error) {
-      console.error("Error al enviar el mensaje por WhatsApp:", error);
-      setAlert({ type: "error", message: "Error al enviar el mensaje por WhatsApp" });
+      console.error("Error al enviar recibo por WhatsApp:", error);
+      setAlert({
+        type: "error",
+        message:
+          "Error al enviar por WhatsApp. Puedes intentar de nuevo con el botón de Reenviar.",
+      });
+    } finally {
+      setIsSending(false);
     }
   };
 
+  // Envío automático UNA sola vez al cargar, si hay receiptUrl
   useEffect(() => {
     if (transaction && transaction.receiptUrl && !sentRef.current) {
-      sentRef.current = true; // Evita envíos dobles
+      sentRef.current = true; // evita doble envío en re-render
       handleSendReceiptWhatsApp();
     }
-  }, [transaction]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transaction?.receiptUrl]);
 
   return (
     <div className="flex flex-col items-center justify-center min-h-screen bg-[#861E3D]">
       {/* Encabezado con botón para regresar */}
       <header className="w-full p-4 flex items-center">
-        <button onClick={() => navigate("/cobrador")} className="bg-gray-300 text-gray-700 p-2 rounded-full hover:bg-gray-400">
+        <button
+          onClick={() => navigate("/cobrador")}
+          className="bg-gray-300 text-gray-700 p-2 rounded-full hover:bg-gray-400"
+        >
           <FaArrowLeft size={20} />
         </button>
       </header>
 
+      {/* Título acorde al tipo de transacción */}
       <h1 className="text-2xl font-bold text-white">
         {transaction.tipo === "adeudo"
           ? "Notificación de Adeudo"
@@ -267,16 +165,35 @@ const PaymentReceipt = () => {
           : "Recibo de Pago"}
       </h1>
 
+      {/* Imagen del comprobante */}
       {transaction.receiptUrl && (
-        <img src={transaction.receiptUrl} alt="Comprobante" className="mt-4 max-w-sm border-2 border-gray-300 rounded mb-6" />
+        <img
+          src={transaction.receiptUrl}
+          alt="Comprobante"
+          className="mt-4 max-w-sm border-2 border-gray-300 rounded mb-6"
+        />
       )}
 
-      <button onClick={handleSendReceiptWhatsApp} className="bg-green-500 text-white px-6 py-3 rounded-lg mt-4" disabled={hasSentWhatsapp}>
-        Reenviar mensaje por WhatsApp
+      {/* Botón para reenviar manualmente por WhatsApp */}
+      <button
+        onClick={handleSendReceiptWhatsApp}
+        className="bg-orange-500 text-white px-6 py-3 rounded-lg mt-2 disabled:opacity-60"
+        disabled={isSending}
+      >
+        {isSending ? "Enviando..." : "Reenviar mensaje por WhatsApp"}
       </button>
 
+      {/* Mensaje de estado */}
       {alert && (
-        <div className={`mt-4 p-4 rounded ${alert.type === "success" ? "bg-green-500" : "bg-red-500"} text-white`}>
+        <div
+          className={`mt-4 p-4 rounded text-white ${
+            alert.type === "success"
+              ? "bg-green-500"
+              : alert.type === "info"
+              ? "bg-blue-500"
+              : "bg-red-500"
+          }`}
+        >
           {alert.message}
         </div>
       )}

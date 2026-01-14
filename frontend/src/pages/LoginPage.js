@@ -2,6 +2,12 @@ import React, { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import logo from "../assets/logo.png";
+import {
+  MdOutlineAddBusiness,
+  MdQrCodeScanner,
+  MdDateRange,
+  MdSos
+} from "react-icons/md";
 
 const LoginPage = () => {
   const { login } = useAuth();
@@ -76,6 +82,14 @@ const LoginPage = () => {
           </button>
         </form>
       </div>
+      <button
+  onClick={() => window.open("https://auxsac.igob.mx/", "_blank", "noopener,noreferrer")}
+  title="SOS"
+  aria-label="SOS"
+  className="fixed bottom-5 right-5 z-[110] h-14 w-14 rounded-full shadow-lg bg-red-600 text-white flex items-center justify-center hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-white/60"
+>
+  <MdSos size={28} />
+</button>
     </div>
   );
 };

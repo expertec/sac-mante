@@ -7,12 +7,14 @@ import {
   where,
   updateDoc,
   addDoc,
+  doc,
+  serverTimestamp,
 } from "firebase/firestore";
 import {
   getStorage,
-  ref,
   uploadString,
   getDownloadURL,
+  ref,
 } from "firebase/storage";
 import { getAuth } from "firebase/auth";
 import { Html5Qrcode } from "html5-qrcode";
@@ -20,20 +22,35 @@ import { Link, useNavigate } from "react-router-dom";
 import dayjs from "dayjs";
 import "dayjs/locale/es";
 import customParseFormat from "dayjs/plugin/customParseFormat";
+// Importar plugins para UTC y timezone
+import utc from "dayjs/plugin/utc";
+import timezone from "dayjs/plugin/timezone";
+
 import logo from "../assets/logo.png";
 import bg from "../assets/bg-app.png";
 import loadingGif from "../assets/carga-gps.gif";
 import BusinessForm from "../components/BusinessForm";
 import { FaTimes } from "react-icons/fa";
-import { MdOutlineAddBusiness, MdQrCodeScanner } from "react-icons/md";
+import {
+  MdOutlineAddBusiness,
+  MdQrCodeScanner,
+  MdDateRange,
+  MdSos
+} from "react-icons/md";
 import cargandoNegocio from "../assets/cargandoNegocio.gif";
+
+// Importaciones de react-datepicker
+import DatePicker from "react-datepicker";
+import "react-datepicker/dist/react-datepicker.css";
+import OfflineAlert from "../pages/OfflineAlert";
 
 // Configurar dayjs
 dayjs.locale("es");
 dayjs.extend(customParseFormat);
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 const AVERAGE_SPEED_KMH = 25;
-const MIN_DISTANCE_KM = 0.05; // 50 metros
 
 /* =========================================
    Custom Hook para Geolocalización
@@ -47,7 +64,6 @@ const useGeolocation = () => {
       setError("Geolocalización o API de permisos no soportadas.");
       return;
     }
-    // Usar "geolocation" (en inglés) para que la API funcione correctamente.
     navigator.permissions.query({ name: "geolocation" }).then((result) => {
       if (result.state === "granted" || result.state === "prompt") {
         navigator.geolocation.getCurrentPosition(
@@ -75,18 +91,22 @@ const useGeolocation = () => {
    Componente AgentDashboard
 ========================================= */
 const AgentDashboard = () => {
-  // Estados principales
-  const [rawBusinesses, setRawBusinesses] = useState([]); // Todos los negocios del agente
-  const [paidBusinessIds, setPaidBusinessIds] = useState([]); // IDs de negocios que pagaron hoy (excluyendo abonos)
-  const [reportedBusinessIds, setReportedBusinessIds] = useState([]); // IDs de negocios con reporte hoy
-  const [adeudoBusinessIds, setAdeudoBusinessIds] = useState([]); // IDs de negocios que registraron un adeudo hoy
-  const [assignedBusinesses, setAssignedBusinesses] = useState([]); // Negocios asignados sin pago, reporte ni adeudo hoy
-  const [filteredBusinesses, setFilteredBusinesses] = useState([]); // Top n más cercanos (solo los que están abiertos)
-  const [searchResults, setSearchResults] = useState([]); // Resultados de búsqueda
+  // ----------------- Estados principales (la lista de negocios se basa en los cobros de HOY)
+  const [rawBusinesses, setRawBusinesses] = useState([]);
+  const [paidBusinessIds, setPaidBusinessIds] = useState([]);
+  const [reportedBusinessIds, setReportedBusinessIds] = useState([]);
+  const [adeudoBusinessIds, setAdeudoBusinessIds] = useState([]);
+  const [assignedBusinesses, setAssignedBusinesses] = useState([]);
+  const [filteredBusinesses, setFilteredBusinesses] = useState([]);
+  const [searchResults, setSearchResults] = useState([]);
+  const [dailyTotal, setDailyTotal] = useState(0);
 
-  // Se muestra siempre 5 negocios, sin opción de "ver más"
-  const displayCount = 5;
+  // Estados para la modal de selección de fecha (solo para la modal)
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [modalTotal, setModalTotal] = useState(0);
+  const [isDateModalOpen, setIsDateModalOpen] = useState(false);
 
+  // Otros estados
   const [loading, setLoading] = useState(true);
   const [isFetchingLocation, setIsFetchingLocation] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
@@ -109,16 +129,14 @@ const AgentDashboard = () => {
   const [alert, setAlert] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
 
-  // Obtenemos la ubicación del usuario
-  const { location: userLocation, error: geoError } = useGeolocation();
+  // Firebase y geolocalización
+  const { location: userLocation } = useGeolocation();
   const db = getFirestore();
   const auth = getAuth();
   const navigate = useNavigate();
   const user = auth.currentUser;
 
-  // =====================================================
-  // Solicitar permiso de cámara una sola vez al montar
-  // =====================================================
+  // ----------------- Permiso de cámara -----------------
   useEffect(() => {
     if (localStorage.getItem("cameraPermissionAsked")) return;
     if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
@@ -135,71 +153,108 @@ const AgentDashboard = () => {
     }
   }, []);
 
-  // -------------------- Suscripción a "cobros" (del día) --------------------
+  // ----------------- Suscripción a cobros (para la lista principal: HOY) -----------------
   useEffect(() => {
     if (!user) return;
+    const queryDate = dayjs(); // Siempre hoy para la consulta principal
+    const startOfDay = queryDate.startOf("day").toDate();
+    const endOfDay = queryDate.endOf("day").toDate();
+
     const agentId = user.uid;
-    const now = new Date();
-    const startOfDay = new Date(
-      now.getFullYear(),
-      now.getMonth(),
-      now.getDate(),
-      0,
-      0,
-      0
-    );
-    const endOfDay = new Date(
-      now.getFullYear(),
-      now.getMonth(),
-      now.getDate(),
-      23,
-      59,
-      59
-    );
     const qCobros = query(
       collection(db, "cobros"),
       where("agentId", "==", agentId),
       where("date", ">=", startOfDay),
       where("date", "<=", endOfDay)
     );
+
     const unsub = onSnapshot(qCobros, (snapshot) => {
+      let total = 0;
       const paymentMap = {};
-      snapshot.docs.forEach((doc) => {
-        const data = doc.data();
+      snapshot.docs.forEach((docSnap) => {
+        const data = docSnap.data();
         if (data.tipo !== "abono") {
+          total += parseFloat(data.netAmount) || 0;
           paymentMap[data.businessId] = true;
         }
       });
-      const paidIds = Object.keys(paymentMap);
-      console.log("Cobros de hoy (excluyendo abonos) =>", paidIds);
-      setPaidBusinessIds(paidIds);
+      setPaidBusinessIds(Object.keys(paymentMap));
+      setDailyTotal(total);
     });
+
     return () => unsub();
   }, [db, user]);
 
-  // -------------------- Suscripción a "reportes" (del día) --------------------
+  // ----------------- Suscripción para la modal: Cobros del día seleccionado -----------------
+  useEffect(() => {
+    // Esta consulta solo se ejecuta cuando la modal está abierta y hay una fecha seleccionada
+    if (!user || !isDateModalOpen || !selectedDate) return;
+
+    const queryDate = dayjs(selectedDate);
+    const startOfDay = queryDate.startOf("day").toDate();
+    const endOfDay = queryDate.endOf("day").toDate();
+    const agentId = user.uid;
+
+    const qModalCobros = query(
+      collection(db, "cobros"),
+      where("agentId", "==", agentId),
+      where("date", ">=", startOfDay),
+      where("date", "<=", endOfDay)
+    );
+
+    const unsub = onSnapshot(qModalCobros, (snapshot) => {
+      let total = 0;
+      snapshot.docs.forEach((docSnap) => {
+        const data = docSnap.data();
+        if (data.tipo !== "abono") {
+          total += parseFloat(data.netAmount) || 0;
+        }
+      });
+      setModalTotal(total);
+    });
+
+    return () => unsub();
+  }, [db, user, selectedDate, isDateModalOpen]);
+
+  // ----------------- Suscripción a reportes (HOY) -----------------
   useEffect(() => {
     if (!user) return;
     const agentId = user.uid;
-    const todayStr = dayjs().format("YYYY-MM-DD");
+    // Usamos dayjs para obtener el rango en hora local
+    const today = dayjs();
+    const startOfDay = today.startOf("day").toDate();
+    const endOfDay = today.endOf("day").toDate();
+    
     const qReportes = query(
       collection(db, "reportes"),
-      where("agentId", "==", agentId)
+      where("agentId", "==", agentId),
+      where("date", ">=", startOfDay),
+      where("date", "<=", endOfDay)
     );
     const unsub = onSnapshot(qReportes, (snapshot) => {
       const ids = snapshot.docs
-        .filter((doc) => {
-          const reportDate = doc.data().date;
-          return reportDate && reportDate.split("T")[0] === todayStr;
+        .map((docSnap) => {
+          const reportData = docSnap.data();
+          let reportDateObj = null;
+          if (reportData.date && reportData.date.toDate) {
+            reportDateObj = reportData.date.toDate();
+          } else if (reportData.date) {
+            reportDateObj = new Date(reportData.date);
+          }
+          // Convertir el timestamp UTC a hora local usando dayjs.utc() y tz()
+          const localReportDate = dayjs.utc(reportDateObj).tz(dayjs.tz.guess());
+          if (localReportDate.isSame(dayjs().tz(dayjs.tz.guess()), "day")) {
+            return reportData.businessId;
+          }
+          return null;
         })
-        .map((doc) => doc.data().businessId);
-      console.log("Reportes de hoy (IDs) =>", ids);
+        .filter(Boolean);
       setReportedBusinessIds(ids);
     });
     return () => unsub();
   }, [db, user]);
 
-  // -------------------- Suscripción a "adeudos" (del día) --------------------
+  // ----------------- Suscripción a adeudos (HOY) -----------------
   useEffect(() => {
     if (!user) return;
     const agentId = user.uid;
@@ -209,16 +264,11 @@ const AgentDashboard = () => {
     );
     const unsub = onSnapshot(qAdeudos, (snapshot) => {
       const adeudoMap = {};
-      snapshot.docs.forEach((doc) => {
-        const data = doc.data();
-        let dateVal = data.date;
+      snapshot.docs.forEach((docSnap) => {
+        const data = docSnap.data();
+        const dateVal = data.date;
         let docDate;
-        if (!dateVal) return;
-        if (typeof dateVal === "string") {
-          const cleanedDateStr = dateVal.replace(/\./g, "");
-          const formato = "D [de] MMMM [de] YYYY, h:mm:ss a [UTC]Z";
-          docDate = dayjs(cleanedDateStr, formato);
-        } else if (dateVal.toDate && typeof dateVal.toDate === "function") {
+        if (dateVal?.toDate) {
           docDate = dayjs(dateVal.toDate());
         } else if (dateVal instanceof Date) {
           docDate = dayjs(dateVal);
@@ -229,51 +279,51 @@ const AgentDashboard = () => {
           adeudoMap[data.businessId] = true;
         }
       });
-      const adeudoIds = Object.keys(adeudoMap);
-      console.log("Adeudos registrados hoy =>", adeudoIds);
-      setAdeudoBusinessIds(adeudoIds);
+      setAdeudoBusinessIds(Object.keys(adeudoMap));
     });
     return () => unsub();
   }, [db, user]);
 
-  // -------------------- Suscripción a "negocios" --------------------
+  // ----------------- Suscripción a negocios -----------------
   useEffect(() => {
     if (!user) return;
     const agentId = user.uid;
     const unsub = onSnapshot(collection(db, "negocios"), (snapshot) => {
-      let all = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+      let all = snapshot.docs.map((docSnap) => ({
+        id: docSnap.id,
+        ...docSnap.data(),
+      }));
       all = all.filter((b) => b.agentId === agentId);
-      console.log("Negocios del agente =>", all);
       setRawBusinesses(all);
       setLoading(false);
     });
     return () => unsub();
   }, [db, user]);
 
-  // -------------------- Filtrar negocios asignados --------------------
+  // ----------------- Filtrar negocios asignados (HOY) -----------------
   useEffect(() => {
     if (!rawBusinesses.length) {
       setAssignedBusinesses([]);
       return;
     }
+    // Filtramos negocios que NO estén en paidBusinessIds, reportedBusinessIds ni adeudoBusinessIds
     const assigned = rawBusinesses.filter((b) => {
       if (paidBusinessIds.includes(b.id)) return false;
       if (reportedBusinessIds.includes(String(b.id))) return false;
       if (adeudoBusinessIds.includes(b.id)) return false;
       return true;
     });
-    console.log("Negocios asignados (sin pago, reporte o adeudo hoy) =>", assigned);
     setAssignedBusinesses(assigned);
   }, [rawBusinesses, paidBusinessIds, reportedBusinessIds, adeudoBusinessIds]);
 
-  // -------------------- Calcular distancia y obtener top 5 --------------------
+  // ----------------- Calcular distancia y obtener top 5 -----------------
   useEffect(() => {
     if (!assignedBusinesses.length || !userLocation) {
       setFilteredBusinesses([]);
       return;
     }
-    const { latitude, longitude } = userLocation;
     setIsFetchingLocation(true);
+    const { latitude, longitude } = userLocation;
     const updated = assignedBusinesses
       .filter((b) => b.location && b.status === "activo")
       .map((b) => {
@@ -289,8 +339,12 @@ const AgentDashboard = () => {
           if (!scheduleDays.includes(todayName)) {
             isOpen = false;
           } else {
-            const [openHour, openMinute] = b.schedule.openingTime.split(":").map(Number);
-            const [closeHour, closeMinute] = b.schedule.closingTime.split(":").map(Number);
+            const [openHour, openMinute] = b.schedule.openingTime
+              .split(":")
+              .map(Number);
+            const [closeHour, closeMinute] = b.schedule.closingTime
+              .split(":")
+              .map(Number);
             const now = dayjs();
             const opening = dayjs().hour(openHour).minute(openMinute).second(0);
             let closing = dayjs().hour(closeHour).minute(closeMinute).second(0);
@@ -318,12 +372,12 @@ const AgentDashboard = () => {
       })
       .filter((b) => b.isOpen)
       .sort((a, b) => parseFloat(a.distance) - parseFloat(b.distance))
-      .slice(0, displayCount);
+      .slice(0, 5);
     setFilteredBusinesses(updated);
     setIsFetchingLocation(false);
-  }, [assignedBusinesses, userLocation, displayCount]);
+  }, [assignedBusinesses, userLocation]);
 
-  // -------------------- Cálculo de distancia (Fórmula Haversine) --------------------
+  // ----------------- Cálculo de distancia (Fórmula Haversine) -----------------
   const calculateDistance = (lat1, lon1, lat2, lon2) => {
     const toRad = (val) => (val * Math.PI) / 180;
     const R = 6371;
@@ -338,7 +392,7 @@ const AgentDashboard = () => {
     return R * c;
   };
 
-  // -------------------- Escáner QR --------------------
+  // ----------------- Escáner QR -----------------
   useEffect(() => {
     if (!showScanner) return;
     const qrCode = new Html5Qrcode("reader");
@@ -368,7 +422,7 @@ const AgentDashboard = () => {
     };
   }, [showScanner, navigate]);
 
-  // -------------------- Manejo del formulario "nuevo negocio" --------------------
+  // ----------------- Manejo del formulario "nuevo negocio" -----------------
   const loadImage = (src) => {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -408,6 +462,7 @@ const AgentDashboard = () => {
         createdAt: timestamp,
         creatorId: userId,
       };
+
       const docRef = await addDoc(collection(db, "negocios"), businessData);
       const canvas = document.createElement("canvas");
       canvas.width = 300;
@@ -436,7 +491,7 @@ const AgentDashboard = () => {
       const qrRef = ref(storage, `qr_codes/${docRef.id}.png`);
       await uploadString(qrRef, qrBase64.split(",")[1], "base64");
       const qrUrl = await getDownloadURL(qrRef);
-      await updateDoc(docRef, { qrUrl });
+      await updateDoc(doc(db, "negocios", docRef.id), { qrUrl });
       setNewBusiness((prev) => ({ ...prev, qrUrl }));
       setCurrentStep(3);
       setAlert({
@@ -452,7 +507,7 @@ const AgentDashboard = () => {
     }
   };
 
-  // -------------------- Filtrar negocios según la búsqueda --------------------
+  // ----------------- Filtrar negocios según la búsqueda -----------------
   useEffect(() => {
     if (!searchQuery) {
       setSearchResults([]);
@@ -470,16 +525,20 @@ const AgentDashboard = () => {
     setSearchResults(results);
   }, [searchQuery, rawBusinesses]);
 
-  // -------------------- Render --------------------
-  if (loading) {
-    return (
+if (loading) {
+  return (
+    <>
+      <OfflineAlert />
       <div className="flex items-center justify-center min-h-screen bg-white">
         <img src={loadingGif} alt="Cargando..." className="w-32 h-32" />
       </div>
-    );
-  }
+    </>
+  );
+}
 
-  return (
+return (
+  <>
+    <OfflineAlert />
     <div
       className="min-h-screen flex flex-col items-center text-white"
       style={{
@@ -488,6 +547,7 @@ const AgentDashboard = () => {
         backgroundPosition: "center",
       }}
     >
+
       {/* Header */}
       <header className="w-full p-4 flex items-center justify-between bg-opacity-80 relative">
         <button
@@ -509,9 +569,87 @@ const AgentDashboard = () => {
 
       {/* Contenedor principal */}
       <div className="flex-1 w-full p-4 bg-[#5c031e] bg-opacity-75">
-        <h1 className="text-2xl font-bold text-center mb-6 text-white">
-          Negocios asignados
-        </h1>
+        {/* Indicador de cobro diario y botón de calendario */}
+        <div className="flex flex-col items-center mb-6">
+          <div className="flex items-center space-x-4">
+            <span
+              className="px-3 py-2 rounded-full text-xl font-semibold"
+              style={{ backgroundColor: "#BB7820", color: "white" }}
+            >
+              Ingresos al día: $ {dailyTotal.toFixed(2)}
+            </span>
+            <button
+              onClick={() => setIsDateModalOpen(true)}
+              style={{ backgroundColor: "#781C2C", color: "white" }}
+              className="px-4 py-2 rounded-full text-xl font-semibold flex items-center"
+            >
+              <MdDateRange className="mr-2" size={20} />
+            </button>
+          </div>
+          <h1 className="text-2xl font-bold text-center mt-4">
+            Negocios asignados
+          </h1>
+        </div>
+
+        {/* Modal de selección de fecha (usando react-datepicker) */}
+        {isDateModalOpen && (
+          <div
+            className="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center z-50"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                setIsDateModalOpen(false);
+              }
+            }}
+          >
+            <div className="bg-white p-6 rounded shadow-md w-full max-w-sm text-black">
+              <div className="flex flex-col items-center">
+                <h2 className="text-lg font-bold mb-4 text-center">
+                  Selecciona una fecha
+                </h2>
+                <div className="w-full mb-4">
+                  <DatePicker
+                    selected={selectedDate ? new Date(selectedDate) : null}
+                    onChange={(date) => {
+                      setSelectedDate(date ? date.toISOString() : null);
+                    }}
+                    dateFormat="dd/MM/yyyy"
+                    className="border p-2 w-full text-black text-lg rounded"
+                    placeholderText="Elige una fecha"
+                  />
+                </div>
+                {selectedDate && (
+                  <p className="mb-4 text-lg text-gray-700 font-medium text-center">
+                    Cobro del{" "}
+                    <span className="font-semibold">
+                      {dayjs(selectedDate).format("DD/MM/YYYY")}
+                    </span>
+                    :
+                    <span className="ml-2 text-green-700 font-bold">
+                      $ {modalTotal.toFixed(2)}
+                    </span>
+                  </p>
+                )}
+                <div className="flex justify-between w-full">
+                  <button
+                    onClick={() => setIsDateModalOpen(false)}
+                    className="px-4 py-2 bg-green-500 text-white rounded mr-2 text-lg w-1/2"
+                  >
+                    Confirmar
+                  </button>
+                  <button
+                    onClick={() => {
+                      setSelectedDate(null);
+                      setIsDateModalOpen(false);
+                    }}
+                    className="px-4 py-2 bg-red-500 text-white rounded text-lg w-1/2"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Campo de búsqueda */}
         <div className="flex justify-center mb-6">
@@ -520,14 +658,14 @@ const AgentDashboard = () => {
             placeholder="Buscar por nombre, propietario, tipo o dirección..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="text-black w-full max-w-md px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="text-black w-full max-w-md px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-lg"
           />
         </div>
 
-        {/* Mostrar alerta, si existe */}
+        {/* Mostrar alerta */}
         {alert && (
           <div
-            className={`mb-4 p-3 rounded border text-center ${
+            className={`mb-4 p-3 rounded border text-center text-lg ${
               alert.type === "success"
                 ? "bg-green-100 border-green-400 text-green-700"
                 : "bg-red-100 border-red-400 text-red-700"
@@ -573,8 +711,12 @@ const AgentDashboard = () => {
                   if (!scheduleDays.includes(todayName)) {
                     isOpen = false;
                   } else {
-                    const [openHour, openMinute] = b.schedule.openingTime.split(":").map(Number);
-                    const [closeHour, closeMinute] = b.schedule.closingTime.split(":").map(Number);
+                    const [openHour, openMinute] = b.schedule.openingTime
+                      .split(":")
+                      .map(Number);
+                    const [closeHour, closeMinute] = b.schedule.closingTime
+                      .split(":")
+                      .map(Number);
                     const now = dayjs();
                     const opening = dayjs().hour(openHour).minute(openMinute).second(0);
                     let closing = dayjs().hour(closeHour).minute(closeMinute).second(0);
@@ -610,7 +752,11 @@ const AgentDashboard = () => {
                       </div>
                     </Link>
                     <div className="flex flex-col items-end gap-2">
-                      <div className={`px-3 py-1 rounded-full text-sm font-semibold ${isOpen ? "bg-green-500 text-white" : "bg-red-500 text-white"}`}>
+                      <div
+                        className={`px-3 py-1 rounded-full text-sm font-semibold ${
+                          isOpen ? "bg-green-500 text-white" : "bg-red-500 text-white"
+                        }`}
+                      >
                         {isOpen ? "Abierto" : "Cerrado"}
                       </div>
                       {b.status === "inactivo" && (
@@ -623,13 +769,19 @@ const AgentDashboard = () => {
                           Pagado
                         </div>
                       )}
+                      {/* Nuevo chip para negocios reportados */}
+                      {reportedBusinessIds.includes(String(b.id)) && (
+                        <div className="px-3 py-1 rounded-full text-sm font-semibold bg-blue-500 text-white">
+                          No encontrado
+                        </div>
+                      )}
                     </div>
                   </li>
                 );
               })}
             </ul>
           ) : (
-            <p className="text-center text-white">
+            <p className="text-center text-lg">
               No se encontraron negocios que coincidan con la búsqueda.
             </p>
           )
@@ -671,11 +823,10 @@ const AgentDashboard = () => {
             ))}
           </ul>
         ) : (
-          
           <div className="flex flex-col items-center justify-center min-h-screen">
-        <img src={cargandoNegocio} alt="Cargando negocio..." className="w-32 h-32" />
-        <p className="mt-4 text-lg">Cargando negocios...</p>
-      </div>
+            <img src={cargandoNegocio} alt="Cargando negocio..." className="w-32 h-32" />
+            <p className="mt-4 text-lg">Cargando negocios...</p>
+          </div>
         )}
       </div>
 
@@ -683,7 +834,9 @@ const AgentDashboard = () => {
       {showScanner && (
         <div className="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50">
           <div className="bg-white p-6 rounded-lg shadow-lg text-black w-full max-w-md">
-            <h2 className="text-lg font-bold mb-4 text-center">Escanea el código QR</h2>
+            <h2 className="text-lg font-bold mb-4 text-center">
+              Escanea el código QR
+            </h2>
             <div id="reader" className="w-full"></div>
             <button
               onClick={() => setShowScanner(false)}
@@ -695,7 +848,7 @@ const AgentDashboard = () => {
         </div>
       )}
 
-      {/* Modal para crear negocio */}
+         {/* Modal para crear negocio */}
       {isModalOpen && (
         <div
           className="fixed inset-0 bg-gray-600 bg-opacity-50 flex justify-center items-center z-50"
@@ -732,7 +885,16 @@ const AgentDashboard = () => {
           </div>
         </div>
       )}
-    </div>
+      <button
+  onClick={() => window.open("https://auxsac.igob.mx/", "_blank", "noopener,noreferrer")}
+  title="SOS"
+  aria-label="SOS"
+  className="fixed bottom-5 right-5 z-[110] h-14 w-14 rounded-full shadow-lg bg-red-600 text-white flex items-center justify-center hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-white/60"
+>
+  <MdSos size={28} />
+</button>
+    </div> {/* <--- Este cierra el div grande */}
+    </>
   );
 };
 

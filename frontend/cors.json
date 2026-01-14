@@ -1,0 +1,9 @@
+[
+    {
+      "origin": ["http://localhost:3000", "https://sac.igob.mx", "https://sac.negociosweb.mx"],
+      "method": ["GET"],
+      "maxAgeSeconds": 3600,
+      "responseHeader": ["Content-Type"]
+    }
+  ]
+  

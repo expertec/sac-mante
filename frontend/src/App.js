@@ -12,6 +12,7 @@ import SingleBusinessPage from "./pages/SingleBusinessPage";
 import PaymentReceipt from "./components/PaymentReceipt";
 import SettingsPage from "./pages/SettingsPage";
 import AgentesGrupos from "./components/AgentesGrupos";
+import ReceiptSearchPage from "./pages/ReceiptSearchPage";
 
 
 
@@ -69,8 +70,9 @@ const App = () => {
           }
           
         />
-<Route path="/negocio/:businessId" element={<SingleBusinessPage />} />
-<Route path="/recibo" element={<PaymentReceipt />} />
+        <Route path="/negocio/:businessId" element={<SingleBusinessPage />} />
+        <Route path="/recibo" element={<PaymentReceipt />} />
+        <Route path="/recibos" element={<ReceiptSearchPage />} />
 
 
 

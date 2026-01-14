@@ -173,29 +173,32 @@ const BusinessForm = ({
   // Se extrae solo el primer nombre del dueño.
   const sendWhatsAppRegistrationTemplate = async (phone, ownerName, businessName) => {
     const firstName = ownerName.split(" ")[0]; // Solo se toma el primer nombre
-    const whatsappPhoneId = "561128823749562"; // Reemplaza con tu Phone ID
-    const token =
-      "EAAIambJJ7DABO52OGc1qbRFiDPERKmDeX8guAq4ycIowjbrZB0NPiZB1vfpXROJ4ldw0eOsPJ7lPZBviuIUL19Y0U938ZCZAwnyZCsoHaR4K9bmbZAy1ZAIysssZBcnb2HxxptkXYL6oOda1CN65gy37y2Y7PhnXE8qfML2yAmSSHVZAuRp4ZCp9iAS6gzOmthjjZAmc"; // Reemplaza con tu token real
+    const whatsappPhoneId = process.env.REACT_APP_WHATSAPP_PHONE_ID; // Set this in your .env
+    const token = process.env.REACT_APP_WHATSAPP_TOKEN;
+    if (!whatsappPhoneId || !token) {
+      console.warn("WhatsApp credentials are missing; skipping notification");
+      return null;
+    }
     const url = `https://graph.facebook.com/v21.0/${whatsappPhoneId}/messages`;
 
-    const payload = {
-      messaging_product: "whatsapp",
-      to: phone,
-      type: "template",
-      template: {
-        name: "registro_comerciante", // Plantilla configurada en WhatsApp Business Manager
-        language: { code: "es_MX" },
-        components: [
-          {
-            type: "body",
-            parameters: [
-              { type: "text", text: firstName },
-              { type: "text", text: businessName },
-            ],
-          },
-        ],
-      },
-    };
+  const payload = {
+    messaging_product: "whatsapp",
+    to: phone,
+    type: "template",
+    template: {
+      name: "registro_comerciante_es", // Plantilla configurada en WhatsApp Business Manager
+      language: { code: "es_MX" },
+      components: [
+        {
+          type: "body",
+          parameters: [
+            { type: "text", text: firstName },
+            { type: "text", text: businessName },
+          ],
+        },
+      ],
+    },
+  };
 
     console.log("Payload para WhatsApp (registro):", JSON.stringify(payload, null, 2));
 

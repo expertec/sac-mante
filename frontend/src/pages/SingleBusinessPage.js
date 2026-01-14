@@ -1,6 +1,7 @@
 // SingleBusinessPage.jsx
 import React, { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import axios from "axios";
 import {
   getFirestore,
   doc,
@@ -43,6 +44,9 @@ const SingleBusinessPage = () => {
   const storage = getStorage();
   const auth = getAuth();
 
+const [isGeneratingReceipt, setIsGeneratingReceipt] = useState(false);
+
+
   // Estados generales y específicos
   const [business, setBusiness] = useState(null);
   const [agentLocation, setAgentLocation] = useState(null);
@@ -67,8 +71,85 @@ const SingleBusinessPage = () => {
   const [captureAction, setCaptureAction] = useState(null);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [modoAdeudo, setModoAdeudo] = useState(false);
+  // Estado para almacenar la foto capturada para reporte
+  const [capturedPhoto, setCapturedPhoto] = useState(null);
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
+  const backendUrl = process.env.REACT_APP_BACKEND_URL;
+
 
   const videoRef = useRef(null);
+
+    const [udToken, setUdToken] = useState("");
+  const [udInstanceId, setUdInstanceId] = useState("");
+  const [loadingConfig, setLoadingConfig] = useState(true);
+
+const handleDeleteTransaction = async (trans) => {
+  try {
+    if (!business) {
+      toast.error("No se encontró el negocio asociado.");
+      return;
+    }
+
+    if (
+      !window.confirm(
+        "¿Seguro que deseas eliminar esta transacción? Esta acción no se puede deshacer."
+      )
+    ) {
+      return;
+    }
+
+    // Solo permitimos borrar cobros y abonos desde este flujo
+    if (
+      !(
+        trans.collection === "cobros" ||
+        trans.tipo === "abono"
+      )
+    ) {
+      toast.error("Solo se pueden eliminar cobros y abonos desde aquí.");
+      return;
+    }
+
+    const transRef = doc(db, trans.collection, trans.id);
+
+    // Eliminamos ÚNICAMENTE el documento de la transacción
+    await runTransaction(db, async (transaction) => {
+      transaction.delete(transRef);
+    });
+
+    // Actualizar lista local en el historial
+    setTransactions((prev) => prev.filter((t) => t.id !== trans.id));
+
+    // Recalcular si hoy sigue teniendo algún cobro registrado
+    try {
+      const now = new Date();
+      const startOfDay = Timestamp.fromDate(
+        new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0)
+      );
+      const endOfDay = Timestamp.fromDate(
+        new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999)
+      );
+
+      const paymentsQuery = query(
+        collection(db, "cobros"),
+        where("businessId", "==", business.id),
+        where("date", ">=", startOfDay),
+        where("date", "<=", endOfDay)
+      );
+      const snapshot = await getDocs(paymentsQuery);
+      setHasPaidToday(!snapshot.empty);
+    } catch (e) {
+      console.warn("No se pudo recalcular estado de pago del día:", e);
+    }
+
+    // Importante: NO tocamos saldo ni adeudo del negocio
+    toast.success("Transacción eliminada correctamente.");
+  } catch (error) {
+    console.error("Error al eliminar transacción:", error);
+    toast.error(error.message || "No se pudo eliminar la transacción.");
+  }
+};
+
+  
 
   // ------------------------------------------------------------------
   // Función para obtener el siguiente folio (para cobros)
@@ -102,104 +183,106 @@ const SingleBusinessPage = () => {
 
   // ------------------------------------------------------------------
   // Función para realizar el cobro normal
-  const handlePayment = async () => {
-    if (!business || !agentLocation) return;
-    try {
-      setIsProcessing(true);
-      const user = auth.currentUser;
-      const agentName = user.displayName || user.email || "Agente";
-      const folioNumber = await getNextFolio();
-      const formattedFolio = folioNumber.toString().padStart(4, "0");
-  
-      // Se incluye el adeudo en el cálculo del monto total
-      const totalAmount =
-        Number(business.quota || 0) + extraTotal + Number(business.adeudo || 0);
-      const availableCredit = Number(business.saldo || 0);
-      let appliedCredit = 0;
-      let netAmount = totalAmount;
-      if (availableCredit > 0) {
-        if (availableCredit >= totalAmount) {
-          appliedCredit = totalAmount;
-          netAmount = 0;
-        } else {
-          appliedCredit = availableCredit;
-          netAmount = totalAmount - availableCredit;
-        }
+const handlePayment = async () => {
+  if (!business || !agentLocation) return;
+  setIsGeneratingReceipt(true); // ← Loader visual
+
+  try {
+    const user = auth.currentUser;
+    const agentName = user.displayName || user.email || "Agente";
+    const folioNumber = await getNextFolio();
+    const formattedFolio = folioNumber.toString().padStart(4, "0");
+
+    // Se incluye el adeudo en el cálculo del monto total
+    const totalAmount =
+      Number(business.quota || 0) + extraTotal + Number(business.adeudo || 0);
+    const availableCredit = Number(business.saldo || 0);
+    let appliedCredit = 0;
+    let netAmount = totalAmount;
+    if (availableCredit > 0) {
+      if (availableCredit >= totalAmount) {
+        appliedCredit = totalAmount;
+        netAmount = 0;
+      } else {
+        appliedCredit = availableCredit;
+        netAmount = totalAmount - availableCredit;
       }
-  
-      const transactionData = {
-        businessId: business.id,
-        agentId: user.uid,
-        agentName,
-        folio: formattedFolio,
-        date: Timestamp.now(),
-        totalAmount,
-        appliedCredit,
-        netAmount,
-        location: { Lat: agentLocation.latitude, Lng: agentLocation.longitude },
-        businessPhone: business.phone,
-        businessName: business.name,
-        ownerName: business.owner || "Dueño no definido",
-      };
-      
-      const docRef = await addDoc(collection(db, "cobros"), transactionData);
-  
-      // Generación del recibo
-      const receiptHtml = `
-        <div id="receipt" style="max-width: 400px; margin: auto; padding: 20px; font-family: Arial, sans-serif; border: 1px solid #e0e0e0; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1);">
-          <div style="text-align: center; margin-bottom: 20px;">
-            <img src="${logo}" alt="Logo" style="width: 100px; margin-bottom: 10px;">
-            <h1 style="font-size: 24px; color: #861E3D; margin: 0;">Pago Exitoso</h1>
-          </div>
-          <div style="border-top: 1px solid #e0e0e0; padding-top: 10px;">
-            <p style="font-size: 16px; margin: 5px 0;"><strong>Folio:</strong> ${transactionData.folio}</p>
-            <p style="font-size: 16px; margin: 5px 0;"><strong>Cargo del día:</strong> $${Number(business.quota || 0).toFixed(2)}</p>
-            ${extraTotal > 0 ? `<p style="font-size: 16px; margin: 5px 0;"><strong>Extras:</strong> $${extraTotal.toFixed(2)}</p>` : ""}
-            <p style="font-size: 18px; margin: 5px 0; color: #333;"><strong>Total:</strong> $${transactionData.totalAmount.toFixed(2)}</p>
-            <p style="font-size: 14px; margin: 5px 0; color: #777;">Cobrado por: ${agentName}</p>
-            <p style="font-size: 14px; margin: 5px 0; color: #777;">Pagado por: ${business.name}</p>
-            <p style="font-size: 12px; margin: 5px 0; color: #aaa;">${new Date().toLocaleString()}</p>
-          </div>
-          <p style="font-size: 10px; text-align: center; margin-top: 20px; line-height: 1.2;">
-            Apartado B. Por el uso de la vía pública por comerciantes ambulantes o con puestos fijos y semifijos<br>
-            Artículo 18.- Los derechos por el uso de la vía pública se causarán conforme a lo siguiente:<br>
-            I. Los comerciantes ambulantes, pagarán de $10.00 diarios;<br>
-            II. Los puestos fijos o semifijos pagarán de $10.00 pesos diarios por m².
-          </p>
-        </div>
-      `;
-      const tempDiv = document.createElement("div");
-      tempDiv.innerHTML = receiptHtml;
-      document.body.appendChild(tempDiv);
-      const receiptElement = document.getElementById("receipt");
-      const canvas = await html2canvas(receiptElement);
-      const imageBase64 = canvas.toDataURL("image/png");
-      document.body.removeChild(tempDiv);
-  
-      const storageRef = ref(storage, `receipts/${docRef.id}.png`);
-      await uploadString(
-        storageRef,
-        imageBase64.split(",")[1],
-        "base64",
-        { contentType: "image/png" }
-      );
-      const receiptUrl = await getDownloadURL(storageRef);
-      await updateDoc(doc(db, "cobros", docRef.id), { receiptUrl });
-  
-      // Se actualiza el saldo y se descuenta el adeudo (seteándolo a 0)
-      const nuevoSaldo = availableCredit - appliedCredit;
-      await updateDoc(doc(db, "negocios", business.id), { saldo: nuevoSaldo, adeudo: 0 });
-      setBusiness((prev) => ({ ...prev, saldo: nuevoSaldo, adeudo: 0 }));
-  
-      setIsProcessing(false);
-      navigate("/recibo", { state: { transaction: { id: docRef.id, ...transactionData, receiptUrl } } });
-    } catch (error) {
-      console.error("Error al procesar el cobro:", error);
-      setIsProcessing(false);
-      toast.error("Error al procesar el cobro");
     }
-  };
-  
+
+    // 1. GENERAR RECIBO HTML
+    const receiptHtml = `
+      <div id="receipt" style="max-width: 400px; margin: auto; padding: 20px; font-family: Arial, sans-serif; border: 1px solid #e0e0e0; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1);">
+        <div style="text-align: center; margin-bottom: 20px;">
+          <img src="${logo}" alt="Logo" style="width: 100px; margin-bottom: 10px;">
+          <h1 style="font-size: 24px; color: #861E3D; margin: 0;">Pago Exitoso</h1>
+        </div>
+        <div style="border-top: 1px solid #e0e0e0; padding-top: 10px;">
+          <p style="font-size: 16px; margin: 5px 0;"><strong>Folio:</strong> ${formattedFolio}</p>
+          <p style="font-size: 16px; margin: 5px 0;"><strong>Cargo del día:</strong> $${Number(business.quota || 0).toFixed(2)}</p>
+          ${extraTotal > 0 ? `<p style="font-size: 16px; margin: 5px 0;"><strong>Extras:</strong> $${extraTotal.toFixed(2)}</p>` : ""}
+          <p style="font-size: 18px; margin: 5px 0; color: #333;"><strong>Total:</strong> $${totalAmount.toFixed(2)}</p>
+          <p style="font-size: 14px; margin: 5px 0; color: #777;">Cobrado por: ${agentName}</p>
+          <p style="font-size: 14px; margin: 5px 0; color: #777;">Pagado por: ${business.name}</p>
+          <p style="font-size: 12px; margin: 5px 0; color: #aaa;">${new Date().toLocaleString()}</p>
+        </div>
+        <p style="font-size: 10px; text-align: center; margin-top: 20px; line-height: 1.2;">
+          Apartado B. Por el uso de la vía pública por comerciantes ambulantes o con puestos fijos y semifijos<br>
+          Artículo 18.- Los derechos por el uso de la vía pública se causarán conforme a lo siguiente:<br>
+          I. Los comerciantes ambulantes, pagarán de $10.00 diarios;<br>
+          II. Los puestos fijos o semifijos pagarán de $10.00 pesos diarios por m².
+        </p>
+        <p style="font-size: 10px; text-align: center; margin-top: 5px; line-height: 1.2;">
+          *El presente comprobante no representa un permiso
+        </p>
+      </div>
+    `;
+
+    // 2. GENERAR LA IMAGEN DEL RECIBO Y SUBIRLA
+    const tempDiv = document.createElement("div");
+    tempDiv.innerHTML = receiptHtml;
+    document.body.appendChild(tempDiv);
+    const receiptElement = document.getElementById("receipt");
+    const canvas = await html2canvas(receiptElement);
+    const imageBase64 = canvas.toDataURL("image/png");
+    document.body.removeChild(tempDiv);
+
+    // Sube la imagen al storage y obtiene la URL
+    const storageRef = ref(storage, `receipts/${formattedFolio}_${Date.now()}.png`);
+    await uploadString(storageRef, imageBase64.split(",")[1], "base64", { contentType: "image/png" });
+    const receiptUrl = await getDownloadURL(storageRef);
+
+    // 3. CREA EL COBRO EN FIRESTORE YA CON LA URL DEL RECIBO
+    const transactionData = {
+      businessId: business.id,
+      agentId: user.uid,
+      agentName,
+      folio: formattedFolio,
+      date: Timestamp.now(),
+      totalAmount,
+      appliedCredit,
+      netAmount,
+      location: { Lat: agentLocation.latitude, Lng: agentLocation.longitude },
+      businessPhone: business.phone,
+      businessName: business.name,
+      ownerName: business.owner || "Dueño no definido",
+      receiptUrl // Ya nunca quedará vacío
+    };
+
+    const docRef = await addDoc(collection(db, "cobros"), transactionData);
+
+    // Se actualiza el saldo y se descuenta el adeudo (seteándolo a 0)
+    const nuevoSaldo = availableCredit - appliedCredit;
+    await updateDoc(doc(db, "negocios", business.id), { saldo: nuevoSaldo, adeudo: 0 });
+    setBusiness((prev) => ({ ...prev, saldo: nuevoSaldo, adeudo: 0 }));
+
+    setIsGeneratingReceipt(false);
+    navigate("/recibo", { state: { transaction: { id: docRef.id, ...transactionData } } });
+  } catch (error) {
+    console.error("Error al procesar el cobro:", error);
+    toast.error("Error al procesar el cobro. Intenta de nuevo.");
+    setIsGeneratingReceipt(false);
+  }
+};
 
   // ------------------------------------------------------------------
   // Función para registrar un abono (se incluye ownerName)
@@ -226,7 +309,7 @@ const SingleBusinessPage = () => {
       } else {
         remainder = abonoValue;
       }
-      
+
       const ownerName = business.owner || "Dueño no definido";
 
       const transactionData = {
@@ -266,6 +349,9 @@ const SingleBusinessPage = () => {
         Artículo 18.- Los derechos por el uso de la vía pública se causarán conforme a lo siguiente:<br>
         I. Los comerciantes ambulantes, pagarán de $10.00 diarios;<br>
         II. Los puestos fijos o semifijos pagarán de $10.00 pesos diarios por m².
+      </p>
+      <p style="font-size: 10px; text-align: center; margin-top: 5px; line-height: 1.2;">
+        *El presente comprobante no representa un permiso
       </p>
     </div>
   `;
@@ -351,6 +437,9 @@ const SingleBusinessPage = () => {
           I. Los comerciantes ambulantes, pagarán de $10.00 diarios;<br>
           II. Los puestos fijos o semifijos pagarán de $10.00 pesos diarios por m².
         </p>
+         <p style="font-size: 10px; text-align: center; margin-top: 5px; line-height: 1.2;">
+        *El presente comprobante no representa un permiso
+      </p>
       </div>
     `;
       const tempDiv = document.createElement("div");
@@ -424,7 +513,29 @@ const SingleBusinessPage = () => {
   const handleNotFound = async () => {
     setCaptureAction("reporte");
     setShowCamera(true);
+    setCapturedPhoto(null);
   };
+    // ➔ 1) Este useEffect leerá la colección “config/whatsapp” al montar el componente
+  useEffect(() => {
+    const fetchConfig = async () => {
+      try {
+        const configRef = doc(db, "config", "whatsapp");
+        const configSnap = await getDoc(configRef);
+        if (configSnap.exists()) {
+          const data = configSnap.data();
+          setUdToken(data.token || "");
+          setUdInstanceId(data.instance_id || "");
+        }
+      } catch (err) {
+        console.error("Error al leer configuración de WhatsApp:", err);
+        toast.error("No se pudo cargar la configuración de WhatsApp.");
+      } finally {
+        setLoadingConfig(false);
+      }
+    };
+    fetchConfig();
+  }, [db]);
+
 
   // ------------------------------------------------------------------
   // Activar la cámara cuando se muestre el modal
@@ -466,24 +577,52 @@ const SingleBusinessPage = () => {
       if (captureAction === "adeudo") {
         await handleDebtPhoto(blob);
       } else if (captureAction === "reporte") {
-        await handleReportePhoto(blob);
+        // Convertir el blob a base64 y almacenarlo para vista previa
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          setCapturedPhoto(reader.result);
+        };
+        reader.readAsDataURL(blob);
       }
     }, "image/png");
   };
 
+  useEffect(() => {
+  const beforeUnloadHandler = (e) => {
+    if (isGeneratingReceipt) {
+      e.preventDefault();
+      e.returnValue = "¡El recibo aún se está generando! No cierres la aplicación.";
+      return e.returnValue;
+    }
+  };
+  window.addEventListener("beforeunload", beforeUnloadHandler);
+  return () => window.removeEventListener("beforeunload", beforeUnloadHandler);
+}, [isGeneratingReceipt]);
+
   // ------------------------------------------------------------------
-  // Función para procesar el reporte "No encontrado"
-  const handleReportePhoto = async (photoBlob) => {
+  // Función para enviar el reporte con la foto capturada (vista previa)
+  const handleSendReportPhoto = async () => {
+    if (!capturedPhoto) {
+      toast.error("Debes capturar una fotografía antes de enviar el reporte.");
+      return;
+    }
+    if (isUploadingPhoto) return;
     try {
+      setIsUploadingPhoto(true);
       const storageRefReporte = ref(storage, `reportes/${business.id}/${Date.now()}.png`);
-      await uploadBytes(storageRefReporte, photoBlob, { contentType: "image/png" });
+      await uploadString(
+        storageRefReporte,
+        capturedPhoto.split(",")[1],
+        "base64",
+        { contentType: "image/png" }
+      );
       const photoURL = await getDownloadURL(storageRefReporte);
       const user = auth.currentUser;
-      const timestamp = new Date().toISOString();
+      // Se reemplaza new Date().toISOString() por Timestamp.now()
       const reportData = {
         businessId: business.id,
         agentId: user.uid,
-        date: timestamp,
+        date: Timestamp.now(),  // <-- Almacenamiento del timestamp como Firestore Timestamp
         location: { Lat: agentLocation.latitude, Lng: agentLocation.longitude },
         photoURL,
       };
@@ -492,6 +631,8 @@ const SingleBusinessPage = () => {
       const updatedStatus = updatedReports >= 5 ? "inactivo" : business.status;
       await updateDoc(doc(db, "negocios", business.id), { reportes: updatedReports, status: updatedStatus });
       setBusiness((prev) => ({ ...prev, reportes: updatedReports, status: updatedStatus }));
+      setCapturedPhoto(null);
+      setCaptureAction(null);
       setShowCamera(false);
       toast.success("Reporte enviado exitosamente");
       if (updatedReports >= 5) {
@@ -500,6 +641,8 @@ const SingleBusinessPage = () => {
     } catch (error) {
       console.error("Error al enviar el reporte:", error);
       toast.error("Error al enviar el reporte");
+    } finally {
+      setIsUploadingPhoto(false);
     }
   };
 
@@ -597,6 +740,24 @@ const SingleBusinessPage = () => {
     }
   };
 
+  // --- Helper para reintentar requests ---
+async function sendWithRetry(requestFn, maxAttempts = 3, delay = 2000) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const result = await requestFn();
+      // Modifica la validación según tu API (puede ser .success, .status, etc)
+      if (result?.data?.status === "success" || result?.status === 200) {
+        return result;
+      } else {
+        throw new Error("Respuesta no exitosa de la API");
+      }
+    } catch (err) {
+      if (attempt === maxAttempts) throw err;
+      await new Promise(res => setTimeout(res, delay));
+    }
+  }
+}
+
   // ------------------------------------------------------------------
   // Función para obtener el historial de transacciones
   const fetchTransactionHistory = async () => {
@@ -632,6 +793,45 @@ const SingleBusinessPage = () => {
       toast.error("Error al cargar el historial");
     }
   };
+
+// Función utilitaria para formatear el número
+function toWhatsAppJid(phone) {
+  let num = String(phone).replace(/\D/g, "");
+  if (num.length === 10) return "521" + num;
+  if (num.length === 12 && num.startsWith("52") && num[2] !== "1")
+    return "521" + num.slice(2);
+  if (num.length === 13 && num.startsWith("521")) return num;
+  return num;
+}
+
+// ...tu función de reenvío
+const handleResendReceipt = async (receiptUrl, businessPhone, businessName, type, date) => {
+  try {
+    if (!receiptUrl || !businessPhone) {
+      toast.error("No se encontró la URL del comprobante o el teléfono del cliente.");
+      return;
+    }
+
+    const phoneFormatted = toWhatsAppJid(businessPhone);
+
+    const caption = `Hola ${businessName || ""}, te reenvío tu recibo de ${type} del ${new Date(
+      date.seconds * 1000 || date
+    ).toLocaleDateString()}.`;
+
+    await axios.post(`${backendUrl}/api/whatsapp/send-image`, {
+      phone: phoneFormatted,
+      imageUrl: receiptUrl,
+      caption,
+    });
+
+    toast.success("Recibo reenviado exitosamente.");
+  } catch (error) {
+    console.error("Error al reenviar el recibo:", error);
+    toast.error("No se pudo reenviar el recibo.");
+  }
+};
+
+
 
   useEffect(() => {
     if (showHistoryModal && business) {
@@ -715,10 +915,26 @@ const SingleBusinessPage = () => {
       setShowReactivateAlert(false);
     }
   };
+if (isGeneratingReceipt) {
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-70 flex flex-col items-center justify-center z-50">
+      <div className="bg-white rounded-lg shadow-lg p-8 flex flex-col items-center">
+        <img src={cargandoNegocio} alt="Cargando..." className="w-24 mb-4" />
+        <h2 className="text-xl font-bold mb-2 text-[#861E3D]">Generando recibo...</h2>
+        <p className="text-gray-700 text-center">
+          Por favor, no cierres la aplicación ni navegues a otra página.<br />
+          Este proceso puede tardar unos segundos.
+        </p>
+      </div>
+    </div>
+  );
+}
 
   // ------------------------------------------------------------------
   // Loader mientras se cargan los datos del negocio
   if (loading) {
+
+    
     return (
       <div className="flex flex-col items-center justify-center min-h-screen">
         <img src={cargandoNegocio} alt="Cargando negocio..." className="w-32 h-32" />
@@ -769,7 +985,6 @@ const SingleBusinessPage = () => {
           </button>
           {isDropdownOpen && (
             <div className="absolute right-0 mt-2 w-48 bg-white border border-gray-200 rounded shadow-lg z-50">
-              {/* Se agregó la clase "block" en cada botón para que la zona clicable ocupe todo el ancho */}
               <button
                 onClick={() => { setShowExtraModal(true); setIsDropdownOpen(false); }}
                 className="block w-full text-left px-4 py-2 hover:bg-gray-100"
@@ -817,21 +1032,33 @@ const SingleBusinessPage = () => {
           </button>
         ) : (
           <button
-            className={`w-3/4 py-4 rounded-lg text-xl mb-4 ${business.status === "inactivo" || hasPaidToday ? "bg-gray-300 text-gray-500 cursor-not-allowed" : "bg-[#861E3D] text-white"}`}
-            disabled={business.status === "inactivo" || hasPaidToday}
+            className={`w-3/4 py-4 rounded-lg text-xl mb-4 ${
+              business.status === "inactivo" || hasPaidToday || isProcessing
+                ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                : "bg-[#861E3D] text-white"
+            }`}
+            disabled={business.status === "inactivo" || hasPaidToday || isProcessing}
             onClick={handlePayment}
           >
-            {hasPaidToday ? "PAGADO" : `COBRAR $${(Number(business.quota) + extraTotal + Number(business.adeudo || 0)).toFixed(2)}`}
+            {hasPaidToday
+              ? "PAGADO"
+              : isProcessing
+              ? "Procesando..."
+              : `COBRAR $${(Number(business.quota) + extraTotal + Number(business.adeudo || 0)).toFixed(2)}`}
           </button>
         )}
 
         {!hasPaidToday && (
           <button
-            className={`w-3/4 py-4 rounded-lg text-xl ${business.status === "inactivo" ? "bg-gray-300 text-gray-500 cursor-not-allowed" : "bg-[#c7a26d] text-white"}`}
-            disabled={business.status === "inactivo"}
+            className={`w-3/4 py-4 rounded-lg text-xl ${
+              business.status === "inactivo" || isProcessing
+                ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                : "bg-[#c7a26d] text-white"
+            }`}
+            disabled={business.status === "inactivo" || isProcessing}
             onClick={handleNotFound}
           >
-            No encontrado
+            {isProcessing ? "Procesando..." : "No encontrado"}
           </button>
         )}
       </div>
@@ -851,80 +1078,175 @@ const SingleBusinessPage = () => {
       {/* Modal de cámara para capturar foto (para adeudo o reporte) */}
       {showCamera && (
         <div className="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50">
-          <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-lg">
-            <h2 className="text-lg font-bold mb-4 text-center">
-              {captureAction === "adeudo" ? "Capturar foto para Adeudo" : "Capturar Foto"}
-            </h2>
-            <video ref={videoRef} className="w-full h-auto rounded-lg mb-4" playsInline></video>
-            <div className="flex justify-between">
-              <button onClick={() => { setShowCamera(false); setCaptureAction(null); }} className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600">
-                Cancelar
-              </button>
-              <button onClick={capturePhoto} className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">
-                Capturar
-              </button>
+          {captureAction === "reporte" && capturedPhoto ? (
+            // Vista previa de la fotografía capturada para reporte
+            <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-lg">
+              <h2 className="text-lg font-bold mb-4 text-center">Vista previa de la fotografía</h2>
+              <img src={capturedPhoto} alt="Vista previa" className="w-full h-auto rounded mb-4 border" />
+              <div className="flex justify-between">
+                <button
+                  onClick={() => {
+                    setCapturedPhoto(null);
+                    setCaptureAction(null);
+                    setShowCamera(false);
+                  }}
+                  className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={handleSendReportPhoto}
+                  disabled={isUploadingPhoto}
+                  className={`px-4 py-2 rounded ${
+                    isUploadingPhoto
+                      ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                      : "bg-green-500 text-white hover:bg-green-600"
+                  }`}
+                >
+                  {isUploadingPhoto ? "Subiendo..." : "Enviar Reporte"}
+                </button>
+              </div>
             </div>
-          </div>
+          ) : (
+            // Mostrar cámara para capturar la foto
+            <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-lg">
+              <h2 className="text-lg font-bold mb-4 text-center">
+                {captureAction === "adeudo" ? "Capturar foto para Adeudo" : "Capturar Foto"}
+              </h2>
+              <video ref={videoRef} className="w-full h-auto rounded-lg mb-4" playsInline></video>
+              <div className="flex justify-between">
+                <button
+                  onClick={() => {
+                    setShowCamera(false);
+                    setCaptureAction(null);
+                    setCapturedPhoto(null);
+                  }}
+                  className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={capturePhoto}
+                  className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
+                >
+                  Capturar
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
       {/* Modal de historial */}
       {showHistoryModal && (
-        <div className="fixed inset-0 bg-white z-50 overflow-y-auto">
-          <div className="p-4">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-2xl font-bold">Historial de Transacciones</h2>
-              <button onClick={() => setShowHistoryModal(false)} className="text-red-500 text-xl font-bold">
-                Cerrar
-              </button>
-            </div>
-            {transactions.length === 0 ? (
-              <p className="text-center text-gray-500">No hay transacciones registradas.</p>
-            ) : (
-              <ul className="space-y-4">
-                {transactions.map((trans) => (
-                  <li key={trans.id} className="border p-4 rounded shadow">
-                    <div className="flex justify-between items-center">
-                      <span className="font-bold">
-                        {trans.tipo === "abono"
-                          ? "Abono"
-                          : trans.collection === "adeudos"
-                          ? "Adeudo"
-                          : "Cobro"}
-                      </span>
-                      <span className="text-sm text-gray-600">
-                        {trans.date.seconds
-                          ? new Date(trans.date.seconds * 1000).toLocaleString()
-                          : new Date(trans.date).toLocaleString()}
-                      </span>
-                    </div>
-                    {trans.folio && (
-                      <p>
-                        <span className="font-bold">Folio:</span> {trans.folio}
-                      </p>
-                    )}
-                    <p>
-                      <span className="font-bold">
-                        {trans.tipo === "abono"
-                          ? "Monto Abonado:"
-                          : trans.collection === "adeudos"
-                          ? "Monto Adeudado:"
-                          : "Monto:"}
-                      </span>{" "}
-                      ${Number(trans.totalAmount).toFixed(2)}
-                    </p>
-                    {trans.collection === "adeudos" && trans.photoURL && (
-                      <div className="mt-2">
-                        <img src={trans.photoURL} alt="Foto del adeudo" className="max-w-full h-auto border rounded" />
-                      </div>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </div>
+  <div className="fixed inset-0 bg-white z-50 overflow-y-auto">
+    <div className="p-4">
+      <div className="flex justify-between items-center mb-4">
+        <h2 className="text-2xl font-bold">Historial de Transacciones</h2>
+        <button onClick={() => setShowHistoryModal(false)} className="text-red-500 text-xl font-bold">
+          Cerrar
+        </button>
+      </div>
+
+      {transactions.length === 0 ? (
+        <p className="text-center text-gray-500">No hay transacciones registradas.</p>
+      ) : (
+        <ul className="space-y-4">
+         {transactions.map((trans) => (
+  <li key={trans.id} className="border p-4 rounded shadow">
+    {/* Encabezado: tipo + fecha */}
+    <div className="flex justify-between items-center">
+      <span className="font-bold">
+        {trans.tipo === "abono"
+          ? "Abono"
+          : trans.collection === "adeudos"
+          ? "Adeudo"
+          : "Cobro"}
+      </span>
+
+      <span className="text-sm text-gray-600">
+        {(() => {
+          // Normalizar fecha (Timestamp, string, número)
+          const d = trans.date;
+          let jsDate = null;
+
+          if (d && typeof d === "object" && "seconds" in d) {
+            jsDate = new Date(d.seconds * 1000);
+          } else if (typeof d === "string" || typeof d === "number") {
+            jsDate = new Date(d);
+          }
+
+          return jsDate && !isNaN(jsDate.getTime())
+            ? jsDate.toLocaleString()
+            : "-";
+        })()}
+      </span>
+    </div>
+
+    {/* Folio */}
+    {trans.folio && (
+      <p className="mt-1">
+        <span className="font-bold">Folio:</span> {trans.folio}
+      </p>
+    )}
+
+    {/* Monto */}
+    <p className="mt-1">
+      <span className="font-bold">
+        {trans.tipo === "abono"
+          ? "Monto Abonado:"
+          : trans.collection === "adeudos"
+          ? "Monto Adeudado:"
+          : "Monto:"}
+      </span>{" "}
+      ${Number(trans.totalAmount || 0).toFixed(2)}
+    </p>
+
+    {/* Foto para adeudos (evidencia) */}
+    {trans.collection === "adeudos" && (trans.photoURL || trans.evidenceURL) && (
+      <div className="mt-2">
+        <img
+          src={trans.photoURL || trans.evidenceURL}
+          alt="Foto del adeudo"
+          className="max-w-full h-auto border rounded"
+        />
+      </div>
+    )}
+
+    {/* Acciones */}
+    <div className="mt-3 flex flex-wrap gap-2">
+      {/* Reenviar recibo si existe */}
+      {(trans.receiptUrl || trans.receiptURL) && (
+        <button
+          onClick={() =>
+            handleResendReceipt(
+              trans.receiptUrl || trans.receiptURL,
+              trans.businessPhone,
+              trans.businessName,
+              trans.tipo ||
+                (trans.collection === "adeudos" ? "adeudo" : "cobro"),
+              trans.date
+            )
+          }
+          className="flex items-center bg-green-500 text-white px-3 py-2 rounded hover:bg-green-600 text-sm"
+        >
+          <FaWhatsapp className="mr-1" />
+          Reenviar recibo
+        </button>
       )}
+
+      {/* Eliminar solo cobros y abonos (según la lógica del handler) */}
+  
+    </div>
+  </li>
+))}
+
+        </ul>
+      )}
+    </div>
+  </div>
+)}
+
 
       {/* Modal de recarga */}
       {showRecargaModal && (
@@ -1061,6 +1383,39 @@ const SingleBusinessPage = () => {
       )}
 
       <ToastContainer position="top-center" autoClose={3000} hideProgressBar />
+
+      {/* Modal de vista previa para reporte (captura de foto) */}
+      {captureAction === "reporte" && capturedPhoto && (
+        <div className="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50">
+          <div className="bg-white p-6 rounded-lg shadow-lg w-full max-w-lg">
+            <h2 className="text-lg font-bold mb-4 text-center">Vista previa de la fotografía</h2>
+            <img src={capturedPhoto} alt="Vista previa" className="w-full h-auto rounded mb-4 border" />
+            <div className="flex justify-between">
+              <button
+                onClick={() => {
+                  setCapturedPhoto(null);
+                  setCaptureAction(null);
+                  setShowCamera(false);
+                }}
+                className="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={handleSendReportPhoto}
+                disabled={isUploadingPhoto}
+                className={`px-4 py-2 rounded ${
+                  isUploadingPhoto
+                    ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                    : "bg-green-500 text-white hover:bg-green-600"
+                }`}
+              >
+                {isUploadingPhoto ? "Subiendo..." : "Enviar Reporte"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

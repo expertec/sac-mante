@@ -135,7 +135,7 @@ const UsersPage = () => {
             className="w-full border border-gray-300 p-2 rounded"
             required
           >
-            <option value="Admin">Admin</option>
+            <option value="admin">admin</option>
             <option value="Cobrador">Cobrador</option>
             <option value="Registrador">Registrador</option>
           </select>

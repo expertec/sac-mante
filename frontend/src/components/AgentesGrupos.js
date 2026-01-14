@@ -1,13 +1,18 @@
 // AgentesGrupos.js
-
-// Todas las importaciones deben estar al inicio del archivo:
-import React, { useState, useEffect } from "react";
-import { getFirestore, collection, query, where, onSnapshot } from "firebase/firestore";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
+import {
+  getFirestore,
+  collection,
+  query,
+  where,
+  onSnapshot,
+} from "firebase/firestore";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc";
 import timezone from "dayjs/plugin/timezone";
 import isBetween from "dayjs/plugin/isBetween";
-import { Line } from "react-chartjs-2";
+import { jsPDF } from "jspdf";
+import * as XLSX from "xlsx";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -18,26 +23,36 @@ import {
   Tooltip,
   Legend,
 } from "chart.js";
+import AgentScoreboardModal from "./AgentScoreboardModal";
 
-// Ahora, después de todos los imports, ejecutamos las extensiones y registros:
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.extend(isBetween);
 
-ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend);
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend
+);
 
-// Componente principal:
 const AgentesGrupos = () => {
   const db = getFirestore();
 
-  // Estados generales
   const [selectedTab, setSelectedTab] = useState("agentes");
   const [agents, setAgents] = useState([]);
   const [businesses, setBusinesses] = useState([]);
   const [payments, setPayments] = useState([]);
   const [selectedAgent, setSelectedAgent] = useState(null);
 
-  // Suscripción a agentes (usuarios con rol "Cobrador")
+  // Estados de carga global
+  const [loadingAgents, setLoadingAgents] = useState(true);
+  const [loadingBusinesses, setLoadingBusinesses] = useState(true);
+  const [loadingPayments, setLoadingPayments] = useState(true);
+
   useEffect(() => {
     const q = query(collection(db, "users"), where("role", "==", "Cobrador"));
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -46,11 +61,11 @@ const AgentesGrupos = () => {
         ...doc.data(),
       }));
       setAgents(agentsData);
+      setLoadingAgents(false);
     });
     return () => unsubscribe();
   }, [db]);
 
-  // Suscripción a negocios activos
   useEffect(() => {
     const q = query(collection(db, "negocios"), where("status", "==", "activo"));
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -59,288 +74,112 @@ const AgentesGrupos = () => {
         ...doc.data(),
       }));
       setBusinesses(businessesData);
+      setLoadingBusinesses(false);
     });
     return () => unsubscribe();
   }, [db]);
 
-  // Suscripción a cobros
   useEffect(() => {
     const unsubscribe = onSnapshot(collection(db, "cobros"), (snapshot) => {
       const paymentsData = snapshot.docs.map((doc) => {
         const data = doc.data();
+        let parsedDate;
+        if (typeof data.date === "string") {
+          parsedDate = dayjs(data.date, "D [de] MMMM [de] YYYY, h:mm:ss a [UTC]Z").toDate();
+        } else if (data.date && data.date.toDate) {
+          parsedDate = data.date.toDate();
+        } else {
+          parsedDate = new Date();
+        }
         return {
           id: doc.id,
           ...data,
-          paymentDate: data.date && data.date.toDate ? data.date.toDate() : new Date(),
+          paymentDate: parsedDate,
           amount: Number(data.netAmount !== undefined ? data.netAmount : data.amount || 0),
-          // Se asume que cada pago tiene la propiedad businessId para identificar el negocio
           businessId: data.businessId,
+          receiptUrl: data.receiptUrl,
         };
       });
       setPayments(paymentsData);
+      setLoadingPayments(false);
     });
     return () => unsubscribe();
   }, [db]);
 
-  // Función para obtener la cantidad de negocios activos asignados a un agente
-  const getActiveBusinessCount = (agentId) => {
-    return businesses.filter((biz) => biz.agentId === agentId).length;
-  };
+  const businessCountByAgent = useMemo(() => {
+    const mapping = {};
+    businesses.forEach((biz) => {
+      if (biz.agentId) {
+        mapping[biz.agentId] = (mapping[biz.agentId] || 0) + 1;
+      }
+    });
+    return mapping;
+  }, [businesses]);
 
-  // Modal: Scorecard con opción para seleccionar período y scroll
-  const AgentScoreboardModal = ({ agent, onClose }) => {
-    // Por defecto, el período es desde hace 1 mes (a partir del día actual) hasta el día actual, usando "America/Mexico_City"
-    const defaultStart = dayjs().tz("America/Mexico_City").subtract(1, "month").format("YYYY-MM-DD");
-    const defaultEnd = dayjs().tz("America/Mexico_City").format("YYYY-MM-DD");
-    const [periodStart, setPeriodStart] = useState(defaultStart);
-    const [periodEnd, setPeriodEnd] = useState(defaultEnd);
+  const getActiveBusinessCount = useCallback(
+    (agentId) => businessCountByAgent[agentId] || 0,
+    [businessCountByAgent]
+  );
 
-    // Función para calcular las métricas en un período dado (zona horaria de México)
-    const getAgentMetricsForPeriod = (agentId, start, end) => {
-      const startDate = dayjs.tz(start, "America/Mexico_City");
-      const endDate = dayjs.tz(end, "America/Mexico_City").endOf("day");
+  const handleDownloadPadron = useCallback(
+    (agent) => {
+      if (!businesses || businesses.length === 0) {
+        alert("No se encontraron negocios.");
+        return;
+      }
+      const assignedBusinesses = businesses.filter((biz) => biz.agentId === agent.id);
+      if (assignedBusinesses.length === 0) {
+        alert("No hay negocios asignados a este agente.");
+        return;
+      }
+      const data = assignedBusinesses.map((biz) => ({
+        ID: biz.id,
+        "Nombre del Negocio": biz.name || "Sin nombre",
+        Dirección: biz.address || "Sin dirección",
+        Estado: biz.status,
+        "Teléfono del Negocio": biz.phone || "Sin teléfono",
+        Quota: biz.quota !== undefined && biz.quota !== null ? biz.quota : "Sin quota",
+        "Agente": agent.name,
+      }));
+      const worksheet = XLSX.utils.json_to_sheet(data);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Negocios");
+      const currentDate = dayjs().format("DD-MM-YY");
+      const fileName = `padron_${agent.name}_${currentDate}.xlsx`;
+      XLSX.writeFile(workbook, fileName);
+    },
+    [businesses]
+  );
 
-      const agentPayments = payments.filter((p) => {
-        const paymentDate = dayjs(p.paymentDate).tz("America/Mexico_City");
-        return p.agentId === agentId && paymentDate.isBetween(startDate, endDate, null, "[]");
-      });
+  const isLoading = loadingAgents || loadingBusinesses || loadingPayments;
 
-      const totalCobros = agentPayments.reduce((sum, p) => sum + p.amount, 0);
-      const numeroCobros = agentPayments.length;
-
-      // Agrupar cobros por día
-      const dailyGroups = {};
-      agentPayments.forEach((payment) => {
-        const dayKey = dayjs(payment.paymentDate).tz("America/Mexico_City").format("YYYY-MM-DD");
-        dailyGroups[dayKey] = (dailyGroups[dayKey] || 0) + payment.amount;
-      });
-      const daysWithPayments = Object.keys(dailyGroups).length;
-      const promedioCobroDiario = daysWithPayments > 0 ? totalCobros / daysWithPayments : 0;
-      const dailyData = Object.entries(dailyGroups)
-        .map(([date, total]) => ({ date, total }))
-        .sort((a, b) => a.date.localeCompare(b.date));
-
-      const lastPayment = agentPayments.reduce((latest, current) => {
-        return !latest || dayjs(current.paymentDate).isAfter(latest.paymentDate)
-          ? current
-          : latest;
-      }, null);
-
-      return { totalCobros, numeroCobros, promedioCobroDiario, lastPayment, dailyData };
-    };
-
-    // Función para calcular el porcentaje de clientes (negocios) a los que se les cobró en el período
-    const getPaymentPercentageForPeriod = (agentId, start, end) => {
-      const assigned = businesses.filter((biz) => biz.agentId === agentId);
-      const totalClients = assigned.length;
-      if (totalClients === 0) return 0;
-      const startDate = dayjs.tz(start, "America/Mexico_City");
-      const endDate = dayjs.tz(end, "America/Mexico_City").endOf("day");
-      const agentPayments = payments.filter((p) => {
-        const paymentDate = dayjs(p.paymentDate).tz("America/Mexico_City");
-        return p.agentId === agentId && paymentDate.isBetween(startDate, endDate, null, "[]") && p.businessId;
-      });
-      const uniquePaid = new Set(agentPayments.map((p) => p.businessId));
-      return (uniquePaid.size / totalClients) * 100;
-    };
-
-    const metrics = getAgentMetricsForPeriod(agent.id, periodStart, periodEnd);
-    const paymentPercentage = getPaymentPercentageForPeriod(agent.id, periodStart, periodEnd);
-
-    // Preparar datos para la gráfica
-    const dailyData = metrics.dailyData || [];
-    const chartLabels = dailyData.map((item) => item.date);
-    const chartValues = dailyData.map((item) => item.total);
-    const chartData = {
-      labels: chartLabels,
-      datasets: [
-        {
-          label: "Cobros Diarios",
-          data: chartValues,
-          fill: false,
-          borderColor: "rgba(75, 192, 192, 1)",
-          backgroundColor: "rgba(75, 192, 192, 0.2)",
-          tension: 0.4,
-        },
-      ],
-    };
-
-    const chartOptions = {
-      responsive: true,
-      scales: {
-        y: {
-          beginAtZero: true,
-          ticks: {
-            stepSize: 20,
-            callback: (value) =>
-              new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN" }).format(value),
-          },
-        },
-      },
-      plugins: {
-        legend: { position: "top" },
-        title: { display: true, text: "Evolución de Cobros Diarios" },
-      },
-    };
-
+  if (isLoading) {
     return (
-      <div className="fixed inset-0 flex items-center justify-center bg-gray-900 bg-opacity-75 z-50 p-4">
-        <div className="bg-white rounded-lg shadow-lg w-full max-w-4xl max-h-[90vh] overflow-y-auto">
-          {/* Encabezado fijo */}
-          <div className="sticky top-0 z-10 bg-white border-b px-6 py-4 flex justify-between items-center">
-            <h2 className="text-3xl font-bold text-gray-800">Scorecard: {agent.name}</h2>
-            <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
-
-          {/* Contenido del modal */}
-          <div className="p-6">
-            {/* Selección de período */}
-            <div className="mb-6">
-              <h3 className="text-xl font-semibold text-gray-800 mb-2">Selecciona un período</h3>
-              <div className="flex space-x-4">
-                <div>
-                  <label className="block text-gray-700">Inicio</label>
-                  <input
-                    type="date"
-                    value={periodStart}
-                    onChange={(e) => setPeriodStart(e.target.value)}
-                    className="mt-1 p-2 border rounded"
-                  />
-                </div>
-                <div>
-                  <label className="block text-gray-700">Fin</label>
-                  <input
-                    type="date"
-                    value={periodEnd}
-                    onChange={(e) => setPeriodEnd(e.target.value)}
-                    className="mt-1 p-2 border rounded"
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Card: Negocios Activos */}
-              <div className="bg-blue-100 rounded-lg p-4 shadow">
-                <div className="flex items-center">
-                  <div className="flex-shrink-0">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-blue-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 10h18M4 21h16a1 1 0 001-1v-9a1 1 0 00-1-1H4a1 1 0 00-1 1v9a1 1 0 001 1z" />
-                    </svg>
-                  </div>
-                  <div className="ml-4">
-                    <h3 className="text-lg font-semibold text-blue-700">Negocios Activos</h3>
-                    <p className="text-2xl font-bold text-blue-900">{getActiveBusinessCount(agent.id)}</p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Card: Número de Cobros */}
-              <div className="bg-green-100 rounded-lg p-4 shadow">
-                <div className="flex items-center">
-                  <div className="flex-shrink-0">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-green-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2l4-4" />
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 22a10 10 0 100-20 10 10 0 000 20z" />
-                    </svg>
-                  </div>
-                  <div className="ml-4">
-                    <h3 className="text-lg font-semibold text-green-700">Número de Cobros</h3>
-                    <p className="text-2xl font-bold text-green-900">{metrics.numeroCobros}</p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Card: Total de Cobros */}
-              <div className="bg-purple-100 rounded-lg p-4 shadow">
-                <div className="flex items-center">
-                  <div className="flex-shrink-0">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-purple-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 1.343-3 3s1.343 3 3 3 3-1.343 3-3-1.343-3-3-3z" />
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 2v2m0 16v2m8-10h2M2 12H4m13.657-7.657l1.414 1.414M4.93 19.07l1.414-1.414m0-11.314L4.93 4.93m13.657 13.657l-1.414-1.414" />
-                    </svg>
-                  </div>
-                  <div className="ml-4">
-                    <h3 className="text-lg font-semibold text-purple-700">Total de Cobros</h3>
-                    <p className="text-2xl font-bold text-purple-900">
-                      {new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN" }).format(metrics.totalCobros)}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Card: Promedio de Cobro Diario */}
-              <div className="bg-indigo-100 rounded-lg p-4 shadow">
-                <div className="flex items-center">
-                  <div className="flex-shrink-0">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-indigo-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 3v18h18" />
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 13h4v4H7zM13 7h4v10h-4z" />
-                    </svg>
-                  </div>
-                  <div className="ml-4">
-                    <h3 className="text-lg font-semibold text-indigo-700">Promedio de Cobro Diario</h3>
-                    <p className="text-2xl font-bold text-indigo-900">
-                      {new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN" }).format(metrics.promedioCobroDiario)}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Card: Último Cobro */}
-              <div className="bg-red-100 rounded-lg p-4 shadow">
-                <div className="flex items-center">
-                  <div className="flex-shrink-0">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-red-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3M3 11h18M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                    </svg>
-                  </div>
-                  <div className="ml-4">
-                    <h3 className="text-lg font-semibold text-red-700">Último Cobro</h3>
-                    {metrics.lastPayment ? (
-                      <p className="text-2xl font-bold text-red-900">
-                        {new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN" }).format(metrics.lastPayment.amount)}
-                        <span className="text-base font-normal text-red-800 ml-2">
-                          el {dayjs(metrics.lastPayment.paymentDate).tz("America/Mexico_City").format("DD/MM/YYYY")}
-                        </span>
-                      </p>
-                    ) : (
-                      <p className="text-2xl font-bold text-red-900">0</p>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* Card: Cobertura de Clientes */}
-              <div className="bg-yellow-100 rounded-lg p-4 shadow">
-                <div className="flex items-center">
-                  <div className="flex-shrink-0">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-yellow-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 3.055a9 9 0 011 17.945M4.935 7.934a9 9 0 0114.13 0" />
-                    </svg>
-                  </div>
-                  <div className="ml-4">
-                    <h3 className="text-lg font-semibold text-yellow-700">Cobertura de Clientes</h3>
-                    <p className="text-2xl font-bold text-yellow-900">{paymentPercentage.toFixed(0)}%</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Gráfica lineal */}
-            <div className="mt-8">
-              <h3 className="text-xl font-semibold text-gray-800 mb-4">Cobros Diarios</h3>
-              <Line data={chartData} options={chartOptions} />
-            </div>
-          </div>
-        </div>
+      <div className="flex items-center justify-center h-screen">
+        <svg
+          className="animate-spin h-12 w-12 text-blue-500 mb-4"
+          xmlns="http://www.w3.org/2000/svg"
+          fill="none"
+          viewBox="0 0 24 24"
+        >
+          <circle
+            className="opacity-25"
+            cx="12"
+            cy="12"
+            r="10"
+            stroke="currentColor"
+            strokeWidth="4"
+          ></circle>
+          <path
+            className="opacity-75"
+            fill="currentColor"
+            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+          ></path>
+        </svg>
+        <p className="text-lg">Cargando datos...</p>
       </div>
     );
-  };
+  }
 
   return (
     <div className="p-6">
@@ -349,13 +188,17 @@ const AgentesGrupos = () => {
         <nav className="flex space-x-4">
           <button
             onClick={() => setSelectedTab("agentes")}
-            className={`px-4 py-2 focus:outline-none ${selectedTab === "agentes" ? "border-b-2 border-blue-500 text-blue-500" : "text-gray-500"}`}
+            className={`px-4 py-2 focus:outline-none ${
+              selectedTab === "agentes" ? "border-b-2 border-blue-500 text-blue-500" : "text-gray-500"
+            }`}
           >
             Agentes
           </button>
           <button
             onClick={() => setSelectedTab("grupos")}
-            className={`px-4 py-2 focus:outline-none ${selectedTab === "grupos" ? "border-b-2 border-blue-500 text-blue-500" : "text-gray-500"}`}
+            className={`px-4 py-2 focus:outline-none ${
+              selectedTab === "grupos" ? "border-b-2 border-blue-500 text-blue-500" : "text-gray-500"
+            }`}
           >
             Grupos
           </button>
@@ -371,7 +214,6 @@ const AgentesGrupos = () => {
                 <tr className="bg-gray-200 text-gray-700 uppercase text-sm leading-normal">
                   <th className="py-3 px-6 text-left">Nombre</th>
                   <th className="py-3 px-6 text-left">Negocios Activos</th>
-                  <th className="py-3 px-6 text-left">Promedio de Cobro Diario</th>
                   <th className="py-3 px-6 text-center">Acciones</th>
                 </tr>
               </thead>
@@ -381,37 +223,27 @@ const AgentesGrupos = () => {
                     <tr key={agent.id} className="border-b border-gray-200 hover:bg-gray-100">
                       <td className="py-3 px-6 text-left whitespace-nowrap">{agent.name}</td>
                       <td className="py-3 px-6 text-left">{getActiveBusinessCount(agent.id)}</td>
-                      <td className="py-3 px-6 text-left">
-                        {new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN" }).format(
-                          (() => {
-                            const startDate = dayjs().tz("America/Mexico_City").subtract(1, "month");
-                            const endDate = dayjs().tz("America/Mexico_City").endOf("day");
-                            const agentPayments = payments.filter((p) => {
-                              const paymentDate = dayjs(p.paymentDate).tz("America/Mexico_City");
-                              return p.agentId === agent.id && paymentDate.isBetween(startDate, endDate, null, "[]");
-                            });
-                            const total = agentPayments.reduce((sum, p) => sum + p.amount, 0);
-                            const days = Object.keys(
-                              agentPayments.reduce((acc, p) => {
-                                const key = dayjs(p.paymentDate).tz("America/Mexico_City").format("YYYY-MM-DD");
-                                acc[key] = true;
-                                return acc;
-                              }, {})
-                            ).length;
-                            return days > 0 ? total / days : 0;
-                          })()
-                        )}
-                      </td>
                       <td className="py-3 px-6 text-center">
-                        <button onClick={() => setSelectedAgent(agent)} className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600">
-                          Ver Score
-                        </button>
+                        <div className="flex items-center justify-center space-x-2">
+                          <button
+                            onClick={() => setSelectedAgent(agent)}
+                            className="bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600"
+                          >
+                            Ver Score
+                          </button>
+                          <button
+                            onClick={() => handleDownloadPadron(agent)}
+                            className="bg-green-500 text-white px-2 py-1 rounded hover:bg-green-600"
+                          >
+                            Descargar Padrón
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan="4" className="text-center py-3 text-gray-500 italic">
+                    <td colSpan="3" className="text-center py-3 text-gray-500 italic">
                       No se encontraron agentes.
                     </td>
                   </tr>
@@ -430,7 +262,12 @@ const AgentesGrupos = () => {
       )}
 
       {selectedAgent && (
-        <AgentScoreboardModal agent={selectedAgent} onClose={() => setSelectedAgent(null)} />
+        <AgentScoreboardModal
+          agent={selectedAgent}
+          businesses={businesses}
+          payments={payments}
+          onClose={() => setSelectedAgent(null)}
+        />
       )}
     </div>
   );
